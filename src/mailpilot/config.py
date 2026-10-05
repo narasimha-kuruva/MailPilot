@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     agent_max_tool_retries: int = 2  # per-call retries on transient tool errors
     agent_tool_timeout_seconds: float = 30.0
     agent_max_execution_seconds: float = 120.0
-    agent_max_output_chars: int = 4000  # cap on a single generated response/draft body
+    agent_max_output_chars: int = 12000  # cap on a single tool result / generated response
 
     # --- Reliability (Phase 5) ---
     gmail_max_retries: int = 2

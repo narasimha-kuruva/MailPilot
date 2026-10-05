@@ -25,4 +25,8 @@ class ReadThreadTool(MCPTool):
 
     async def run(self, **kwargs: Any) -> EmailThread:
         args = self.args_schema.model_validate(kwargs)
-        return await self._gmail_client.get_thread(args.thread_id)
+        thread = await self._gmail_client.get_thread(args.thread_id)
+        # HTML bodies are dropped for the same reason as in `read_email`.
+        return thread.model_copy(
+            update={"messages": [m.model_copy(update={"body_html": None}) for m in thread.messages]}
+        )

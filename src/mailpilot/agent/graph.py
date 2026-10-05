@@ -70,7 +70,7 @@ class AgentLimits:
     max_tool_retries: int = 2  # retries per individual tool call on transient errors
     tool_timeout_seconds: float = 30.0
     max_execution_seconds: float = 120.0
-    max_output_chars: int = 4000  # cap on a single message's text content
+    max_output_chars: int = 12000  # cap on a single tool result / message text (a 5-message thread is ~5k)
 
 
 class GraphState(TypedDict):

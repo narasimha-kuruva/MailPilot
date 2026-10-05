@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import base64
 
-from mailpilot.gmail.mime_utils import build_raw_draft, parse_address, parse_message, reply_all_recipients
+from mailpilot.gmail.mime_utils import (
+    build_raw_draft,
+    html_to_text,
+    parse_address,
+    parse_message,
+    reply_all_recipients,
+)
 from mailpilot.schemas.email import EmailAddress, EmailMessage
 
 
@@ -128,3 +134,31 @@ def test_reply_all_without_own_email_keeps_everyone() -> None:
     to, _ = reply_all_recipients(message)
 
     assert [a.email for a in to] == ["alice@example.com", "me@example.com"]
+
+
+def test_html_to_text_drops_markup_and_scripts_and_keeps_line_breaks() -> None:
+    html = (
+        "<html><head><style>p{color:red}</style></head><body>"
+        "<p>Hello&nbsp;there,</p><script>alert(1)</script>"
+        "<div>Your code is <b>1234</b>.</div><p>Thanks</p></body></html>"
+    )
+
+    assert html_to_text(html) == "Hello there,\nYour code is 1234.\nThanks"
+
+
+def test_parse_message_derives_text_from_html_only_body() -> None:
+    raw = {
+        "id": "msg-3",
+        "threadId": "thread-3",
+        "snippet": "",
+        "payload": {
+            "mimeType": "text/html",
+            "headers": [{"name": "Subject", "value": "OTP"}],
+            "body": {"data": _b64("<p>Your login OTP is <b>987654</b></p>")},
+        },
+    }
+
+    message = parse_message(raw)
+
+    assert message.body_text == "Your login OTP is 987654"
+    assert message.body_html == "<p>Your login OTP is <b>987654</b></p>"

@@ -11,6 +11,7 @@ from mailpilot.mcp.tools.read_thread import ReadThreadTool
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.mcp.tools.search_emails import SearchEmailsTool
 from mailpilot.mcp.tools.send_email import SendEmailTool
+from mailpilot.schemas.email import EmailSummary
 from mailpilot.safety.guardrails import GuardrailViolation
 from tests.fakes import FakeGmailClient
 
@@ -24,6 +25,25 @@ async def test_search_emails_delegates_to_gmail_client() -> None:
 
     assert client.calls == [("search_messages", ("is:unread", 10))]
     assert len(results) == 1
+    summary = results[0]
+    assert isinstance(summary, EmailSummary)
+    assert summary.message_id == "msg-1"
+    assert summary.sender.email == "alice@example.com"
+    assert summary.snippet == "Let's sync on this..."
+    assert not hasattr(summary, "body_text")  # bodies are fetched via read_email
+
+
+@pytest.mark.asyncio
+async def test_read_email_and_read_thread_strip_html_bodies() -> None:
+    client = FakeGmailClient()
+    client._message = client._message.model_copy(update={"body_html": "<p>big markup</p>"})
+
+    message = await ReadEmailTool(client).run(message_id="msg-1")
+    thread = await ReadThreadTool(client).run(thread_id="thread-1")
+
+    assert message.body_html is None
+    assert message.body_text == "Let's sync on this urgently."
+    assert all(m.body_html is None for m in thread.messages)
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ setup.
 from __future__ import annotations
 
 import base64
+from html.parser import HTMLParser
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.utils import formataddr, parseaddr
@@ -79,6 +80,46 @@ def _header(headers: list[dict[str, str]], name: str) -> str:
     return ""
 
 
+class _TextExtractor(HTMLParser):
+    """Minimal HTML -> readable text: drops script/style, keeps text, breaks on block tags."""
+
+    _BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul", "ol"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in ("script", "style", "head"):
+            self._skip_depth += 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style", "head") and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self._parts)
+        lines = (" ".join(line.split()) for line in raw.splitlines())
+        return "\n".join(line for line in lines if line)
+
+
+def html_to_text(html: str) -> str:
+    """Best-effort plain text from an HTML body, for messages that have no text/plain part."""
+    parser = _TextExtractor()
+    parser.feed(html)
+    parser.close()
+    return parser.text()
+
+
 def _decode_body(data: str) -> str:
     # Gmail base64url-encodes body data and may omit padding.
     padded = data + "=" * (-len(data) % 4)
@@ -110,6 +151,10 @@ def parse_message(raw_message: dict[str, Any]) -> EmailMessage:
     payload = raw_message.get("payload", {})
     headers = payload.get("headers", [])
     body_text, body_html = _extract_bodies(payload)
+    if not body_text and body_html:
+        # HTML-only messages (common for notifications/newsletters) would
+        # otherwise show the model nothing; derive readable text instead.
+        body_text = html_to_text(body_html) or None
 
     received_at = None
     internal_date = raw_message.get("internalDate")

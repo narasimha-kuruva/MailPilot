@@ -266,6 +266,19 @@ covering different angles — see findings section below):
   `tests/gmail/test_google_client.py` (stub service asserts distinct http per
   request). OAuth consent flow + token refresh also verified live.
 
+- ✅ **Live agent bug found & fixed (2026-10-05):** first real-inbox run looped
+  `search_emails` 9x until `max_execution_seconds` (limits worked as designed).
+  Cause: `search_emails` returned full `EmailMessage`s incl. `body_html`; 5 real
+  messages = ~29k chars vs the 4k `max_output_chars` cap -> model saw truncated,
+  unparseable JSON and re-searched. Fixes: new `schemas.email.EmailSummary`
+  (ids/sender/subject/snippet/labels/is_unread, no bodies) returned by
+  `search_emails` (description tells the model to use read_* for content);
+  `read_email`/`read_thread` drop `body_html`; `mime_utils.html_to_text()` +
+  `parse_message` derives `body_text` from HTML for HTML-only mail (2 of 5 real
+  inbox mails had no text part); `max_output_chars` default 4000 -> 12000.
+  Verified live (gemini-3.6-flash): same instruction completes in 12s with one
+  tool call, correct answer. Search result now ~2.9k chars.
+
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 
 5. **ChromaDB calls block the event loop.** `rag/chroma_service.py` calls

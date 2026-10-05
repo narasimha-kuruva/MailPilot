@@ -1,4 +1,10 @@
-"""`read_email` MCP tool."""
+"""`read_email` MCP tool.
+
+The HTML body is dropped from the result: it's several times the size of
+the text body and the model gains nothing from markup. `body_text` is
+always populated (derived from HTML when the message has no text part --
+see `mailpilot.gmail.mime_utils.parse_message`).
+"""
 
 from __future__ import annotations
 
@@ -25,4 +31,5 @@ class ReadEmailTool(MCPTool):
 
     async def run(self, **kwargs: Any) -> EmailMessage:
         args = self.args_schema.model_validate(kwargs)
-        return await self._gmail_client.get_message(args.message_id)
+        message = await self._gmail_client.get_message(args.message_id)
+        return message.model_copy(update={"body_html": None})
