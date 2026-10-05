@@ -231,6 +231,30 @@ covering different angles — see findings section below):
    `FakeGmailClient.set_thread_messages()` added so tests can use a
    multi-recipient thread. Suite: 96 passed.
 
+### B2. Live-credential findings (2026-10-05, real Gemini key now available)
+
+- `gemini-1.5-pro` and `text-embedding-004` are retired. Defaults changed to
+  `gemini-3.7-flash` / `models/gemini-embedding-2` (3072 dims) in `config.py`,
+  `.env.example`, `.env`. Verified live: plain, `with_structured_output`,
+  `bind_tools`, and a full `LangGraphAgent.run()` with a real tool call.
+  `gemini-3.5/3.6-flash` also work. Pro models return 429 "check plan and
+  billing" (not on free tier). `gemini-3.8-flash` was 503 "high demand".
+- **Free tier = 20 requests/day/model.** Burned through it while probing; the
+  approval-gate + `resume()` round trip was NOT reached live (unit-tested only).
+  Re-run `RUN 2` from this session's e2e script once quota resets or billing
+  is enabled.
+- Gemini 3.x returns `content` as a list of blocks with thought signatures.
+  Fixed `_message_text` to extract only text (was `str(list)` -> signature
+  blob leaked into `final_response`). `agent_node` deliberately does not
+  truncate/mutate list content (signatures must round-trip). Test added.
+- **New reliability gap found:** `agent_node`'s LLM call is NOT wrapped in
+  `with_retries` (only tool calls are), so a single transient 503 from Gemini
+  kills the whole run with a 500. Add to section C: wrap the
+  `llm_with_tools.ainvoke` in `with_retries` (classify_error already treats
+  503/429 as transient -- but a 429 *daily quota* 429 should probably NOT be
+  retried; check the message for "quota" / RetryInfo before retrying).
+- `GMAIL_USER_EMAIL` is set; `secrets/client_secret.json` still missing.
+
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 
 5. **ChromaDB calls block the event loop.** `rag/chroma_service.py` calls

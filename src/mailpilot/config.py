@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # --- LLM Provider (Google Gemini) ---
     google_api_key: str | None = None
-    gemini_model: str = "gemini-1.5-pro"
+    gemini_model: str = "gemini-3.7-flash"
 
     # --- Gmail OAuth ---
     google_oauth_client_secrets_file: str = "./secrets/client_secret.json"
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # --- ChromaDB / RAG (Phase 3) ---
     chroma_persist_dir: str = "./data/chroma"
-    rag_embedding_model: str = "models/text-embedding-004"
+    rag_embedding_model: str = "models/gemini-embedding-2"
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 100
     rag_top_k: int = 5

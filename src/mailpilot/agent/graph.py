@@ -159,6 +159,12 @@ def build_agent_graph(
             }
 
         response: AIMessage = await llm_with_tools.ainvoke(state["messages"])
+        # Only plain-string content is truncated in place. Newer Gemini models
+        # return a list of content blocks carrying "thought signatures" that
+        # must be sent back verbatim on the next turn for tool calling to
+        # work; rewriting those blocks would break the conversation. The
+        # user-facing text is extracted (not mutated) by
+        # `langgraph_agent._message_text`.
         if isinstance(response.content, str):
             response.content = _truncate(response.content, limits.max_output_chars)
 

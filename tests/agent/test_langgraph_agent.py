@@ -244,3 +244,18 @@ async def test_plan_decomposes_the_goal_without_executing_anything() -> None:
 
     assert [step.description for step in plan.steps] == outline.steps
     assert gmail_client.calls == []  # plan() must not execute anything
+
+
+def test_message_text_extracts_only_text_from_content_blocks() -> None:
+    """Gemini 3.x returns block lists with opaque signatures; the user must only ever see the text."""
+    from mailpilot.agent.langgraph_agent import _message_text
+
+    message = AIMessage(
+        content=[
+            {"type": "text", "text": "Found 2 unread emails.", "extras": {"signature": "OPAQUE-BLOB"}},
+            {"type": "text", "text": " Want me to summarise them?"},
+        ]
+    )
+
+    assert _message_text(message) == "Found 2 unread emails. Want me to summarise them?"
+    assert _message_text(AIMessage(content="plain")) == "plain"

@@ -52,8 +52,25 @@ class ApprovalExpiredError(ValueError):
 
 
 def _message_text(message: BaseMessage) -> str:
+    """Extract the human-readable text from a message.
+
+    Newer Gemini models return `content` as a list of typed blocks (e.g.
+    `{"type": "text", "text": ..., "extras": {"signature": ...}}`) rather
+    than a plain string; only the text parts belong in the user-facing
+    response, never the raw block structure or opaque signatures.
+    """
     content = message.content
-    return content if isinstance(content, str) else str(content)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type", "text") == "text" and block.get("text"):
+                parts.append(str(block["text"]))
+        return "".join(parts)
+    return str(content)
 
 
 class LangGraphAgent(Agent):
