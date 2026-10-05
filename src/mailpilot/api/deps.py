@@ -16,7 +16,7 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.memory import MemorySaver
 
 from mailpilot.agent.base import Agent
@@ -29,9 +29,10 @@ from mailpilot.gmail.client import GmailClient
 from mailpilot.gmail.google_client import GoogleGmailClient
 from mailpilot.intelligence.gemini_service import GeminiIntelligenceService
 from mailpilot.intelligence.service import IntelligenceService
+from mailpilot.llm.providers import LLMProviderError, build_chat_model, build_embedding_function
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.rag.chroma_service import ChromaRAGService
-from mailpilot.rag.embeddings import EmbeddingFunction, GeminiEmbeddingFunction
+from mailpilot.rag.embeddings import EmbeddingFunction
 from mailpilot.rag.service import RAGService
 from mailpilot.safety.approval import ApprovalService
 from mailpilot.safety.in_memory_approval import InMemoryApprovalService
@@ -39,13 +40,11 @@ from mailpilot.safety.in_memory_approval import InMemoryApprovalService
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
-def _require_google_api_key(settings: Settings) -> str:
-    if not settings.google_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="GOOGLE_API_KEY is not configured. Set it in .env before using the agent endpoints.",
-        )
-    return settings.google_api_key
+def _unavailable(exc: LLMProviderError) -> HTTPException:
+    # Provider misconfiguration (missing API key, Ollama not running, model
+    # not pulled) is an operator problem, not a client error: 503 with the
+    # provider's own explanation of how to fix it.
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 @lru_cache
@@ -64,17 +63,20 @@ def get_approval_service() -> ApprovalService:
 
 
 @lru_cache
-def get_chat_model() -> ChatGoogleGenerativeAI:
-    settings = get_settings()
-    api_key = _require_google_api_key(settings)
-    return ChatGoogleGenerativeAI(model=settings.gemini_model, google_api_key=api_key)
+def get_chat_model() -> BaseChatModel:
+    """The configured provider's chat model (Gemini or local Ollama) -- see `mailpilot.llm`."""
+    try:
+        return build_chat_model(get_settings())
+    except LLMProviderError as exc:
+        raise _unavailable(exc) from exc
 
 
 @lru_cache
 def get_embedding_function() -> EmbeddingFunction:
-    settings = get_settings()
-    api_key = _require_google_api_key(settings)
-    return GeminiEmbeddingFunction(model=settings.rag_embedding_model, google_api_key=api_key)
+    try:
+        return build_embedding_function(get_settings())
+    except LLMProviderError as exc:
+        raise _unavailable(exc) from exc
 
 
 @lru_cache

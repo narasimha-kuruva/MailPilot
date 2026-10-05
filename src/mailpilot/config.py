@@ -35,9 +35,20 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # --- LLM provider selection (Phase 5) ---
+    # "gemini": hosted, needs GOOGLE_API_KEY. "ollama": local, no API quota;
+    # models must be pulled separately (`ollama pull <model>`), MailPilot
+    # never downloads them. See `mailpilot.llm.providers`.
+    llm_provider: Literal["gemini", "ollama"] = "gemini"
+
     # --- LLM Provider (Google Gemini) ---
     google_api_key: str | None = None
     gemini_model: str = "gemini-3.7-flash"
+
+    # --- Local LLM (Ollama) -- used only when llm_provider == "ollama" ---
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "gemma4:e2b"
+    ollama_embedding_model: str = "embeddinggemma"  # only needed by the RAG tools
 
     # --- Gmail OAuth ---
     google_oauth_client_secrets_file: str = "./secrets/client_secret.json"

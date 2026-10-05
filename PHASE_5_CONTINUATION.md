@@ -279,6 +279,26 @@ covering different angles — see findings section below):
   Verified live (gemini-3.6-flash): same instruction completes in 12s with one
   tool call, correct answer. Search result now ~2.9k chars.
 
+### B3. Local LLM provider (Ollama) -- DONE (2026-10-05, not yet live-tested)
+
+- `LLM_PROVIDER=gemini|ollama` (`Settings.llm_provider`), `OLLAMA_BASE_URL`,
+  `OLLAMA_MODEL` (default `gemma4:e2b`), `OLLAMA_EMBEDDING_MODEL` (default
+  `embeddinggemma`, only needed by the RAG tools). New `mailpilot/llm/providers.py`:
+  `build_chat_model()` / `build_embedding_function()` dispatch on the provider;
+  `ensure_ollama_ready()` checks `GET /api/tags` and raises `LLMProviderError`
+  ("install/start Ollama" or "run `ollama pull <model>`") -- MailPilot never
+  downloads models. `api/deps.py` delegates to the factory and maps
+  `LLMProviderError` -> 503 (the old missing-GOOGLE_API_KEY 503 is unchanged).
+  Ollama embeddings check readiness on first use, so the agent starts without
+  the embedding model. `langchain-ollama` added to pyproject. Tests in
+  `tests/llm/test_providers.py` stub the Ollama endpoint (no Ollama needed).
+- Everything downstream only sees `BaseChatModel` (`bind_tools` +
+  `with_structured_output`), so no agent/tool/RAG code changed.
+- NOT verified live: Ollama is not installed on this machine. Whether
+  `gemma4:e2b` tool-calls well enough for the loop is still open; the first
+  live test is the read-only "list my 5 most recent inbox emails" run with
+  `LLM_PROVIDER=ollama` as a one-off env override.
+
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 
 5. **ChromaDB calls block the event loop.** `rag/chroma_service.py` calls
