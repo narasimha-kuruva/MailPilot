@@ -21,7 +21,12 @@ from mailpilot.schemas.email import EmailSummary
 
 class SearchEmailsArgs(BaseModel):
     query: str = Field(
-        ..., min_length=1, description="Gmail search query, e.g. 'from:alice is:unread newer_than:7d'."
+        ...,
+        min_length=1,
+        description=(
+            "Gmail search query using Gmail operators, e.g. 'in:inbox', 'is:unread', "
+            "'from:alice newer_than:7d'."
+        ),
     )
     max_results: int = Field(
         default=10,

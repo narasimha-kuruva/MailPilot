@@ -37,24 +37,55 @@ def _unreachable(_base_url: str):
 # --- configuration -----------------------------------------------------------
 
 
-def test_provider_defaults_to_gemini_with_ollama_defaults_present() -> None:
+def test_provider_defaults_to_local_ollama() -> None:
     settings = _settings()
 
-    assert settings.llm_provider == "gemini"
+    assert settings.llm_provider == "ollama"
     assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.ollama_model == "gemma4:e2b"
+    assert settings.gemini_model == "gemini-3.7-flash"  # Gemini stays configured, just not selected
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_class"),
+    [("ollama", "ChatOllama"), ("gemini", "ChatGoogleGenerativeAI")],
+)
+def test_both_providers_are_selectable_through_configuration_alone(monkeypatch, provider, expected_class) -> None:
+    """Switching providers is a configuration change, never a code change, and
+    both hand the application the same BaseChatModel surface."""
+    monkeypatch.setattr(providers, "_fetch_tags", _tags("gemma4:e2b"))
+    monkeypatch.setenv("LLM_PROVIDER", provider)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+
+    chat_model = build_chat_model(_settings())
+
+    assert type(chat_model).__name__ == expected_class
+    assert callable(chat_model.bind_tools)
+    assert callable(chat_model.with_structured_output)
+
+
+def test_no_silent_fallback_to_gemini_when_ollama_is_unavailable(monkeypatch) -> None:
+    """A configured Gemini key must never be used while Ollama is the selected provider."""
+    monkeypatch.setattr(providers, "_fetch_tags", _unreachable)
+
+    with pytest.raises(LLMProviderError, match="LLM_PROVIDER=ollama") as info:
+        build_chat_model(_settings(llm_provider="ollama", google_api_key="test-key"))
+
+    assert "set LLM_PROVIDER=gemini" in str(info.value)  # the switch is explicit, by the operator
 
 
 def test_provider_is_read_from_env(monkeypatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("OLLAMA_MODEL", "gemma4:e4b")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://gpu-box:11434")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "32768")
 
     settings = _settings()
 
     assert settings.llm_provider == "ollama"
     assert settings.ollama_model == "gemma4:e4b"
     assert settings.ollama_base_url == "http://gpu-box:11434"
+    assert settings.ollama_num_ctx == 32768
 
 
 def test_unknown_provider_is_rejected() -> None:
@@ -73,7 +104,7 @@ def test_gemini_without_api_key_gives_clear_error() -> None:
 def test_gemini_builds_chat_model_and_embeddings_with_configured_names() -> None:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    settings = _settings(google_api_key="test-key", gemini_model="gemini-3.7-flash")
+    settings = _settings(llm_provider="gemini", google_api_key="test-key", gemini_model="gemini-3.7-flash")
 
     chat_model = build_chat_model(settings)
     embeddings = build_embedding_function(settings)
@@ -127,6 +158,7 @@ def test_ollama_builds_chat_model_with_configured_model_and_url(monkeypatch) -> 
     assert isinstance(chat_model, ChatOllama)
     assert chat_model.model == "gemma4:e2b"
     assert chat_model.base_url == "http://gpu-box:11434"
+    assert chat_model.num_ctx == 16384  # not Ollama's 4096 default -- one email would not fit
     # The agent graph needs both of these from whatever model it gets.
     assert callable(chat_model.bind_tools)
     assert callable(chat_model.with_structured_output)
@@ -157,7 +189,7 @@ async def test_ollama_embeddings_defer_readiness_check_until_first_use(monkeypat
 
 def test_deps_translate_provider_error_into_503(monkeypatch) -> None:
     monkeypatch.setattr(providers, "_fetch_tags", _unreachable)
-    monkeypatch.setattr(deps, "get_settings", lambda: _settings(llm_provider="ollama"))
+    monkeypatch.setattr(deps, "get_settings", lambda: _settings())  # the default provider: ollama
     deps.get_chat_model.cache_clear()
     try:
         with pytest.raises(HTTPException) as info:

@@ -1,7 +1,13 @@
 """Build the chat model and embedding function for the configured provider.
 
+    LLM_PROVIDER=ollama  -> ChatOllama + Ollama embeddings (local, no API quota; the default)
     LLM_PROVIDER=gemini  -> ChatGoogleGenerativeAI + Gemini embeddings (needs GOOGLE_API_KEY)
-    LLM_PROVIDER=ollama  -> ChatOllama + Ollama embeddings (local, no API quota)
+
+Selection is driven by configuration alone and is deterministic: if the
+chosen provider is unavailable the error says so, and nothing ever falls
+back to the other provider. Both return LangChain `BaseChatModel`s (with
+`bind_tools` / `with_structured_output`) and `EmbeddingFunction`s, so the
+agent graph, tools, RAG and intelligence code are provider-agnostic.
 
 The Ollama path never downloads models: `ensure_ollama_ready` checks that
 the server is reachable and that the configured model has already been
@@ -65,7 +71,8 @@ def ensure_ollama_ready(
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise LLMProviderError(
             f"LLM_PROVIDER=ollama but Ollama is not reachable at {base_url} ({exc}). "
-            f"{OLLAMA_INSTALL_HINT}, or set OLLAMA_BASE_URL to where it is running."
+            f"{OLLAMA_INSTALL_HINT}, or set OLLAMA_BASE_URL to where it is running. "
+            "To use the cloud model instead, set LLM_PROVIDER=gemini (with GOOGLE_API_KEY)."
         ) from exc
 
     installed = [str(item.get("name", "")) for item in tags.get("models", [])]
@@ -74,7 +81,8 @@ def ensure_ollama_ready(
         raise LLMProviderError(
             f"Ollama is running at {base_url} but the model '{model}' is not installed. "
             f"Run `ollama pull {model}` (MailPilot never downloads models itself). "
-            f"Installed models: {installed_text}."
+            f"Installed models: {installed_text}. "
+            "To use the cloud model instead, set LLM_PROVIDER=gemini (with GOOGLE_API_KEY)."
         )
 
 
@@ -110,7 +118,14 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         from langchain_ollama import ChatOllama
 
         ensure_ollama_ready(settings, settings.ollama_model)
-        return ChatOllama(model=settings.ollama_model, base_url=settings.ollama_base_url)
+        # Ollama's server default context window is 4096 tokens. The system
+        # prompt, the tool schemas and one full email already fill that, and
+        # the model is then left a handful of tokens for its answer (seen
+        # live: done_reason=length, empty reply). The models themselves
+        # support far more; OLLAMA_NUM_CTX sets what we actually ask for.
+        return ChatOllama(
+            model=settings.ollama_model, base_url=settings.ollama_base_url, num_ctx=settings.ollama_num_ctx
+        )
 
     raise LLMProviderError(f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. Use 'gemini' or 'ollama'.")
 

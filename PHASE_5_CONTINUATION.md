@@ -279,7 +279,7 @@ covering different angles — see findings section below):
   Verified live (gemini-3.6-flash): same instruction completes in 12s with one
   tool call, correct answer. Search result now ~2.9k chars.
 
-### B3. Local LLM provider (Ollama) -- DONE (2026-10-05, not yet live-tested)
+### B3. Local LLM provider (Ollama) -- DONE, live-verified (2026-10-05)
 
 - `LLM_PROVIDER=gemini|ollama` (`Settings.llm_provider`), `OLLAMA_BASE_URL`,
   `OLLAMA_MODEL` (default `gemma4:e2b`), `OLLAMA_EMBEDDING_MODEL` (default
@@ -294,10 +294,20 @@ covering different angles — see findings section below):
   `tests/llm/test_providers.py` stub the Ollama endpoint (no Ollama needed).
 - Everything downstream only sees `BaseChatModel` (`bind_tools` +
   `with_structured_output`), so no agent/tool/RAG code changed.
-- NOT verified live: Ollama is not installed on this machine. Whether
-  `gemma4:e2b` tool-calls well enough for the loop is still open; the first
-  live test is the read-only "list my 5 most recent inbox emails" run with
-  `LLM_PROVIDER=ollama` as a one-off env override.
+- **Ollama is now the DEFAULT provider** (`Settings.llm_provider = "ollama"`,
+  `.env.example`, `.env`); Gemini stays fully supported via
+  `LLM_PROVIDER=gemini`. No fallback in either direction.
+- Live-verified with Ollama 0.35.1 + `gemma4:e2b` (4.6B, Q4_K_M, GPU):
+  tool call with sensible args, continuation after a tool result, a
+  search->read chain, structured output, and the read-only "list my 5 most
+  recent inbox emails" run against the real inbox (16s, correct). Found and
+  fixed: Ollama's default `num_ctx` is 4096 -> the read-and-summarise run
+  ended with `done_reason=length` after 9 output tokens (prompt was 4085).
+  New `OLLAMA_NUM_CTX` (default 16384) passed as `num_ctx` to `ChatOllama`.
+  Observed limitation: it once used `is:inbox` instead of `in:inbox`
+  (Gmail tolerated it) -> `search_emails` description now lists operators.
+  Answers are terser than Gemini's. The approval/send path has NOT been run
+  with the local model (read-only only, by instruction).
 
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 

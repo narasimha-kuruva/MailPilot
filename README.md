@@ -85,8 +85,9 @@ src/mailpilot/
 
 1. A client `POST`s a natural-language instruction to `/api/v1/agent/run`.
 2. `LangGraphAgent.run()` invokes the **LangGraph** workflow
-   (`agent/graph.py`): an `agent` node calls Gemini (bound to the seven MCP
-   tools) to decide what to do next.
+   (`agent/graph.py`): an `agent` node calls the configured chat model
+   (local Ollama by default, or Gemini -- see "Choosing the LLM provider"),
+   bound to the MCP tools, to decide what to do next.
 3. If the model calls a non-sensitive tool (`search_emails`, `read_email`,
    `read_thread`, `list_labels`, `apply_label`, `create_draft`), a `tools`
    node validates the arguments (Pydantic `args_schema`), calls the
@@ -128,6 +129,47 @@ except `RAGService`, but callers everywhere still depend on the interface
 Gmail provider, LLM, or persistence backend can be swapped in later without
 touching the agent, MCP, or API layers.
 
+## Choosing the LLM provider
+
+MailPilot runs on a **local model by default** and switches to Google
+Gemini with one configuration change. The choice is made in exactly one
+place -- `mailpilot/llm/providers.py`, from `LLM_PROVIDER` -- and nothing
+else knows which provider is active: the LangGraph agent, MCP tools, Gmail
+client, RAG, approval gate and audit log only ever see a LangChain
+`BaseChatModel` (with `bind_tools` / `with_structured_output`) and an
+`EmbeddingFunction`, so there is one implementation of each, not one per
+provider.
+
+| `LLM_PROVIDER` | Chat model | Embeddings (RAG tools only) | Needs |
+|---|---|---|---|
+| `ollama` (default) | `OLLAMA_MODEL`, default `gemma4:e2b`, served by Ollama at `OLLAMA_BASE_URL` | `OLLAMA_EMBEDDING_MODEL`, default `embeddinggemma` | [Ollama](https://ollama.com) running, with the models pulled: `ollama pull gemma4:e2b` (and `ollama pull embeddinggemma` for RAG) |
+| `gemini` | `GEMINI_MODEL`, default `gemini-3.7-flash` | `RAG_EMBEDDING_MODEL`, default `models/gemini-embedding-2` | `GOOGLE_API_KEY` from Google AI Studio |
+
+To switch, change `LLM_PROVIDER` in `.env` and restart; no code changes.
+Selection is deterministic: if the selected provider is unavailable --
+Ollama not running, model not pulled, Gemini key missing -- the agent
+endpoints return `503` with the exact fix, and MailPilot **never falls
+back** to the other provider on its own. MailPilot never downloads models
+either; pulling them is a deliberate operator step.
+
+### Notes on `gemma4:e2b` (verified live against a real inbox)
+
+- The agent loop works unchanged: the model picks the right tool with
+  sensible arguments, continues after a tool result, chains tools
+  (search, then read), and returns a final answer. Structured output
+  (classification, drafting) works too. A single-tool question takes
+  about 15 s end to end on a GPU; the first call after a cold start adds
+  the model load time.
+- `OLLAMA_NUM_CTX` (default 16384) matters. Ollama's own default context
+  window is 4096 tokens, which the system prompt, tool schemas and one
+  full email already fill: the model was left 9 tokens for its answer and
+  returned an empty reply. The model supports up to 131072.
+- It is less precise with Gmail search syntax than Gemini (it once sent
+  `is:inbox` instead of `in:inbox`; Gmail tolerated it), so the search
+  tool's description now lists the operators. Keep instructions concrete.
+- Its answers are terser and less polished than Gemini's; for drafting
+  client-facing replies, Gemini remains the better choice.
+
 ## Dependencies
 
 Declared in `pyproject.toml`; Phase 2 is the first phase to actually
@@ -137,7 +179,7 @@ exercise most of these:
 |---|---|
 | `fastapi`, `uvicorn[standard]` | API layer |
 | `pydantic`, `pydantic-settings`, `python-dotenv` | Schemas + env config |
-| `langchain-core`, `langchain-google-genai` | Gemini chat model + tool binding |
+| `langchain-core`, `langchain-ollama`, `langchain-google-genai` | Chat models (local Ollama by default, Gemini optional) + tool binding |
 | `langgraph` | The agent workflow (`agent/graph.py`) |
 | `google-api-python-client`, `google-auth`, `google-auth-oauthlib`, `google-auth-httplib2` | Gmail OAuth + API calls |
 | `chromadb` | Vector store — still unused, reserved for Phase 3 RAG |
@@ -160,8 +202,11 @@ copy .env.example .env        # Windows; cp on macOS/Linux
 
 Then fill in `.env`:
 
-- `GOOGLE_API_KEY` — a Gemini API key from Google AI Studio. Required for
-  `/api/v1/agent/*`; `/health` works without it.
+- `LLM_PROVIDER` — `ollama` (default) or `gemini`; see "Choosing the LLM
+  provider" above. With `ollama`, install Ollama and pull `gemma4:e2b`
+  first. `/health` works without either provider configured.
+- `GOOGLE_API_KEY` — a Gemini API key from Google AI Studio. Required only
+  when `LLM_PROVIDER=gemini`.
 - `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` — path to an OAuth **Desktop app**
   client secrets JSON downloaded from Google Cloud Console (Gmail API must
   be enabled on that project). Required the first time any `/agent/*`

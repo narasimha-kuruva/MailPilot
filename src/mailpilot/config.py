@@ -36,10 +36,12 @@ class Settings(BaseSettings):
     api_port: int = 8000
 
     # --- LLM provider selection (Phase 5) ---
-    # "gemini": hosted, needs GOOGLE_API_KEY. "ollama": local, no API quota;
-    # models must be pulled separately (`ollama pull <model>`), MailPilot
-    # never downloads them. See `mailpilot.llm.providers`.
-    llm_provider: Literal["gemini", "ollama"] = "gemini"
+    # "ollama" (default): local model via Ollama, no API quota; models must be
+    # pulled separately (`ollama pull <model>`), MailPilot never downloads them.
+    # "gemini": hosted Google Gemini, needs GOOGLE_API_KEY. Selection is
+    # deterministic -- there is no automatic fallback from one to the other.
+    # See `mailpilot.llm.providers`.
+    llm_provider: Literal["gemini", "ollama"] = "ollama"
 
     # --- LLM Provider (Google Gemini) ---
     google_api_key: str | None = None
@@ -49,6 +51,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma4:e2b"
     ollama_embedding_model: str = "embeddinggemma"  # only needed by the RAG tools
+    ollama_num_ctx: int = 16384  # context window; Ollama's own default (4096) can't hold one full email
 
     # --- Gmail OAuth ---
     google_oauth_client_secrets_file: str = "./secrets/client_secret.json"
