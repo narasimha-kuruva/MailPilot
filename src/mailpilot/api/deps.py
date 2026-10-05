@@ -103,6 +103,7 @@ def get_agent() -> Agent:
         rag_service=get_rag_service(),
         chat_model=chat_model,
         max_context_chars=settings.rag_max_context_chars,
+        own_email=settings.gmail_user_email,
     )
     limits = AgentLimits(
         max_steps=settings.agent_max_steps,

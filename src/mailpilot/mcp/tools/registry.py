@@ -36,6 +36,7 @@ def build_tools(
     rag_service: RAGService | None = None,
     chat_model: Any = None,
     max_context_chars: int = 6000,
+    own_email: str | None = None,
 ) -> dict[str, MCPTool]:
     tools: list[MCPTool] = [
         SearchEmailsTool(gmail_client),
@@ -53,6 +54,10 @@ def build_tools(
         tools.append(ExtractTasksTool(gmail_client, intelligence_service))
 
     if rag_service is not None and chat_model is not None:
-        tools.append(DraftGroundedReplyTool(gmail_client, rag_service, chat_model, max_context_chars))
+        tools.append(
+            DraftGroundedReplyTool(
+                gmail_client, rag_service, chat_model, max_context_chars, own_email=own_email
+            )
+        )
 
     return {tool.name: tool for tool in tools}

@@ -34,16 +34,20 @@ def _render_thread(thread: EmailThread) -> str:
 
 
 def _pack_context(chunks: list[RetrievedChunk], max_chars: int) -> list[RetrievedChunk]:
-    """Greedily keep the highest-scored chunks until the character budget runs out.
+    """Greedily keep the highest-scored chunks that fit in the character budget.
 
     This is the "prioritize relevant context rather than blindly inserting
-    everything retrieved" behavior called for in Phase 3.3.
+    everything retrieved" behavior called for in Phase 3.3. Chunks are
+    visited best-score first; one that doesn't fit is *skipped*, not
+    treated as the end of the list, so a smaller lower-scored chunk after
+    it can still be used. The single best chunk is always included even if
+    it alone exceeds the budget -- some context beats none.
     """
     packed: list[RetrievedChunk] = []
     used = 0
     for chunk in sorted(chunks, key=lambda c: c.score, reverse=True):
         if used + len(chunk.text) > max_chars and packed:
-            break
+            continue
         packed.append(chunk)
         used += len(chunk.text)
     return packed

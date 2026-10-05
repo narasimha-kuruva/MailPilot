@@ -29,6 +29,43 @@ def parse_address_list(raw: str) -> list[EmailAddress]:
     return [parse_address(part) for part in raw.split(",") if part.strip()]
 
 
+def reply_all_recipients(
+    message: EmailMessage, own_email: str | None = None
+) -> tuple[list[EmailAddress], list[EmailAddress]]:
+    """Compute "reply all" recipients for a reply to `message`.
+
+    To = the original sender followed by the original To list; Cc = the
+    original Cc list. Addresses are de-duplicated case-insensitively, the
+    user's own address (`own_email`, if known) is dropped so they don't
+    mail themselves, and anything already in To is not repeated in Cc.
+    If removing the user's own address would leave To empty (e.g. replying
+    to a message the user sent), the original sender is kept so the draft
+    always has at least one recipient.
+
+    Every address returned comes from `message` itself, so the result is
+    always safe under `mailpilot.safety.guardrails.validate_reply_recipients`.
+    """
+    own = own_email.strip().lower() if own_email else None
+    seen: set[str] = set()
+
+    def _take(candidates: list[EmailAddress]) -> list[EmailAddress]:
+        kept: list[EmailAddress] = []
+        for address in candidates:
+            key = address.email.strip().lower()
+            if not key or key in seen or key == own:
+                continue
+            seen.add(key)
+            kept.append(address)
+        return kept
+
+    to = _take([message.sender, *message.to])
+    if not to:
+        seen.add(message.sender.email.strip().lower())
+        to = [message.sender]
+    cc = _take(message.cc)
+    return to, cc
+
+
 def _format_address(address: EmailAddress) -> str:
     # formataddr quotes the display name when needed (e.g. "Doe, John"), so
     # a comma in a name can't be mistaken for an address separator.

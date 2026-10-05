@@ -215,34 +215,21 @@ covering different angles — see findings section below):
 
 ### B. Correctness bugs found by review, not yet fixed
 
-3. **`agent/reply_drafting.py::_pack_context` breaks too early.** Chunks are
-   sorted by score descending; the current loop does
-   `if used + len(chunk.text) > max_chars and packed: break`. This means a
-   single large high-score chunk that doesn't fit stops the whole packing
-   process, even though a smaller lower-score chunk after it might still
-   fit comfortably. Fix: change `break` to `continue` so smaller
-   later chunks still get a chance. (Re-read the function before editing —
-   the `and packed` condition exists so the *first* chunk is always
-   included even if it alone exceeds the budget; preserve that behavior,
-   just don't abandon the rest of the list.)
-   Add a test: three chunks scored high/big, medium/big, low/small where
-   the low/small one should end up included even though the medium one was
-   skipped.
+3. ✅ **DONE (2026-10-05)** -- `_pack_context` now `continue`s past a chunk that
+   doesn't fit instead of `break`ing, so smaller lower-scored chunks still get
+   packed; the "first chunk always included" behaviour is preserved. Tests in
+   `tests/agent/test_reply_drafting.py`.
 
-4. **`mcp/tools/draft_grounded_reply.py` narrows replies to only
-   `last_message.sender`**, dropping every other original To/Cc recipient
-   (no reply-all). Fix: build the reply's `to`/`cc` from the last message's
-   own `sender` + `to` + `cc` (deduplicated, case-insensitive on email),
-   rather than just `[last_message.sender]`. This is *more* correct
-   (matches normal "reply all" semantics) and stays safe under
-   `validate_reply_recipients` since every address still comes from the
-   thread itself. Update the tool's test in
-   `tests/mcp/test_intelligence_tools.py` (currently asserts recipients ==
-   `["alice@example.com"]` only — `FakeGmailClient`'s fixture thread only
-   has one message with no `to`/`cc` set on it besides `me@example.com`, so
-   check what the fixture actually produces before asserting; may need to
-   extend the fixture thread to have a multi-recipient message to make this
-   test meaningful).
+4. ✅ **DONE (2026-10-05)** -- reply-all. New
+   `gmail/mime_utils.reply_all_recipients(message, own_email)` builds To =
+   sender + original To, Cc = original Cc, deduped case-insensitively, minus
+   the user's own address, never repeating a To in Cc, and falling back to
+   the sender if To would be empty. `DraftGroundedReplyTool` uses it and takes
+   an `own_email` ctor param, threaded through `build_tools(own_email=...)`
+   from `Settings.gmail_user_email` in `api/deps.py` (if `GMAIL_USER_EMAIL` is
+   unset the user may be included in To -- harmless, documented).
+   `FakeGmailClient.set_thread_messages()` added so tests can use a
+   multi-recipient thread. Suite: 96 passed.
 
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 

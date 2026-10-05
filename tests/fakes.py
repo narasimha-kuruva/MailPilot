@@ -37,6 +37,11 @@ class FakeGmailClient(GmailClient):
             body_text="Let's sync on this urgently.",
             labels=["INBOX"],
         )
+        self._thread_messages: list[EmailMessage] | None = None
+
+    def set_thread_messages(self, messages: list[EmailMessage]) -> None:
+        """Override what `get_thread` returns (default: the single fixture message)."""
+        self._thread_messages = messages
 
     async def search_messages(self, query: str, max_results: int = 25) -> list[EmailMessage]:
         self.calls.append(("search_messages", (query, max_results)))
@@ -48,7 +53,8 @@ class FakeGmailClient(GmailClient):
 
     async def get_thread(self, thread_id: str) -> EmailThread:
         self.calls.append(("get_thread", (thread_id,)))
-        return EmailThread(thread_id=thread_id, subject=self._message.subject, messages=[self._message])
+        messages = self._thread_messages if self._thread_messages is not None else [self._message]
+        return EmailThread(thread_id=thread_id, subject=messages[0].subject, messages=messages)
 
     async def list_labels(self) -> list[Label]:
         self.calls.append(("list_labels", ()))

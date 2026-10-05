@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import base64
 
-from mailpilot.gmail.mime_utils import build_raw_draft, parse_address, parse_message
-from mailpilot.schemas.email import EmailAddress
+from mailpilot.gmail.mime_utils import build_raw_draft, parse_address, parse_message, reply_all_recipients
+from mailpilot.schemas.email import EmailAddress, EmailMessage
 
 
 def _b64(text: str) -> str:
@@ -80,3 +80,51 @@ def test_build_raw_draft_roundtrips_headers_and_body() -> None:
     assert "cc@example.com" in decoded
     assert "Hi there" in decoded
     assert "This is the body." in decoded
+
+
+def _message(sender: str, to: list[str], cc: list[str]) -> EmailMessage:
+    return EmailMessage(
+        message_id="m",
+        thread_id="t",
+        sender=EmailAddress(email=sender),
+        to=[EmailAddress(email=a) for a in to],
+        cc=[EmailAddress(email=a) for a in cc],
+    )
+
+
+def test_reply_all_includes_sender_to_and_cc_minus_self() -> None:
+    message = _message("alice@example.com", ["me@example.com", "bob@example.com"], ["carol@example.com"])
+
+    to, cc = reply_all_recipients(message, own_email="me@example.com")
+
+    assert [a.email for a in to] == ["alice@example.com", "bob@example.com"]
+    assert [a.email for a in cc] == ["carol@example.com"]
+
+
+def test_reply_all_dedupes_case_insensitively_and_never_repeats_to_in_cc() -> None:
+    message = _message(
+        "Alice@Example.com", ["alice@example.com", "bob@example.com"], ["BOB@example.com", "dan@example.com"]
+    )
+
+    to, cc = reply_all_recipients(message)
+
+    assert [a.email for a in to] == ["Alice@Example.com", "bob@example.com"]
+    assert [a.email for a in cc] == ["dan@example.com"]
+
+
+def test_reply_all_keeps_sender_when_excluding_self_would_empty_to() -> None:
+    """Replying to your own sent message with no other recipients still produces a recipient."""
+    message = _message("me@example.com", [], [])
+
+    to, cc = reply_all_recipients(message, own_email="me@example.com")
+
+    assert [a.email for a in to] == ["me@example.com"]
+    assert cc == []
+
+
+def test_reply_all_without_own_email_keeps_everyone() -> None:
+    message = _message("alice@example.com", ["me@example.com"], [])
+
+    to, _ = reply_all_recipients(message)
+
+    assert [a.email for a in to] == ["alice@example.com", "me@example.com"]
