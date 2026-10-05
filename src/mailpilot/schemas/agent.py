@@ -7,7 +7,7 @@ establishes the data model so the interface is stable.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -41,7 +41,7 @@ class AgentPlan(BaseModel):
     conversation_id: str
     goal: str
     steps: list[PlannedStep] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PlanOutline(BaseModel):

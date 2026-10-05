@@ -21,9 +21,14 @@ from mailpilot.schemas.email import EmailSummary
 
 class SearchEmailsArgs(BaseModel):
     query: str = Field(
-        ..., description="Gmail search query, e.g. 'from:alice is:unread newer_than:7d'."
+        ..., min_length=1, description="Gmail search query, e.g. 'from:alice is:unread newer_than:7d'."
     )
-    max_results: int = Field(default=25, ge=1, le=100)
+    max_results: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Use the smallest number that answers the question; every result costs Gmail quota.",
+    )
 
 
 class SearchEmailsTool(MCPTool):

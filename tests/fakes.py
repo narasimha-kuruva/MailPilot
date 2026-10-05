@@ -116,9 +116,12 @@ class FakeChatModel:
         return self
 
     async def ainvoke(self, messages: list[Any]) -> Any:
+        """Yield the next queued response; a queued exception instance is raised instead."""
         self.invocations.append(list(messages))
         response = self._responses[self._index]
         self._index += 1
+        if isinstance(response, BaseException):
+            raise response
         return response
 
 
@@ -133,6 +136,7 @@ class FakeEmbeddingFunction:
 
     def __init__(self, dimensions: int = 16) -> None:
         self._dimensions = dimensions
+        self.document_calls = 0  # how many embed_documents() batches were requested
 
     def _vector(self, text: str) -> list[float]:
         import hashlib
@@ -141,6 +145,7 @@ class FakeEmbeddingFunction:
         return [b / 255.0 for b in digest[: self._dimensions]]
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.document_calls += 1
         return [self._vector(text) for text in texts]
 
     async def embed_query(self, text: str) -> list[float]:

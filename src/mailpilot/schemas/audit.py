@@ -7,7 +7,7 @@ it, so the full execution history of a run can be reconstructed later.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -30,4 +30,4 @@ class AuditRecord(BaseModel):
     status: ToolCallStatus
     result_summary: str | None = None
     approval_status: ApprovalStatus = ApprovalStatus.NOT_REQUIRED
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

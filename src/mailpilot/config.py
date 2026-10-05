@@ -80,10 +80,14 @@ class Settings(BaseSettings):
     agent_tool_timeout_seconds: float = 30.0
     agent_max_execution_seconds: float = 120.0
     agent_max_output_chars: int = 12000  # cap on a single tool result / generated response
+    agent_max_llm_retries: int = 3  # per model call, on transient 503/429/timeouts
+    agent_llm_retry_base_delay_seconds: float = 2.0
+    agent_llm_timeout_seconds: float = 60.0  # raise for slow local (CPU-only) models
 
     # --- Reliability (Phase 5) ---
-    gmail_max_retries: int = 2
-    gmail_retry_base_delay_seconds: float = 0.5
+    gmail_max_retries: int = 3  # per request; rate-limit 403/429s are retried with backoff
+    gmail_retry_base_delay_seconds: float = 1.0  # 1s, 2s, 4s
+    gmail_max_concurrent_fetches: int = 5  # message bodies fetched in parallel per search
 
     @field_validator("require_approval_before_send")
     @classmethod

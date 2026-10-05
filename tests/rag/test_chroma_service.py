@@ -103,3 +103,29 @@ async def test_reingesting_same_thread_upserts_rather_than_duplicates(tmp_path: 
     results = await service.query("pricing", top_k=10)
 
     assert len(results) == 1  # not duplicated
+
+
+@pytest.mark.asyncio
+async def test_ingest_thread_embeds_every_message_in_a_single_batch(tmp_path: Path) -> None:
+    """One embedding request per thread, not one per message -- on a metered
+    embedding API that is the difference between 1 and N calls."""
+    embedding = FakeEmbeddingFunction()
+    service = ChromaRAGService(
+        persist_dir=str(tmp_path / "chroma"), embedding_function=embedding, chunk_size=200, chunk_overlap=20
+    )
+    messages = [
+        EmailMessage(
+            message_id=f"m{i}",
+            thread_id="thread-9",
+            subject="Planning",
+            sender=EmailAddress(email=f"p{i}@example.com"),
+            body_text=f"Message number {i} about the renewal plan.",
+        )
+        for i in range(3)
+    ]
+
+    await service.ingest_thread(EmailThread(thread_id="thread-9", subject="Planning", messages=messages))
+
+    assert embedding.document_calls == 1
+    results = await service.query("renewal plan", top_k=10)
+    assert sorted(chunk.metadata["message_id"] for chunk in results) == ["m0", "m1", "m2"]

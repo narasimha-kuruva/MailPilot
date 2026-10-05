@@ -104,3 +104,121 @@ async def test_search_messages_returns_empty_when_nothing_matches() -> None:
 
     assert await _client(service).search_messages("is:unread") == []
     assert len(service.http_log) == 1
+
+
+class _GmailHttpError(Exception):
+    """Shaped like `googleapiclient.errors.HttpError`: `.resp.status` plus Gmail's wording."""
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.resp = self._Resp(status)
+
+
+class _FailingMessages(_Messages):
+    """`get` fails for the ids in `errors` with the given exception."""
+
+    def __init__(self, ids: list[str], log: list[Any], errors: dict[str, Exception]) -> None:
+        super().__init__(ids, log)
+        self._errors = errors
+        self.get_calls = 0
+
+    def get(self, *, id: str, **_: Any) -> _Request:  # noqa: A002
+        self.get_calls += 1
+        if id in self._errors:
+            raise self._errors[id]
+        return super().get(id=id)
+
+
+def _failing_service(ids: list[str], errors: dict[str, Exception]) -> _Service:
+    service = _Service(ids)
+    service._users._messages = _FailingMessages(ids, service.http_log, errors)
+    return service
+
+
+@pytest.mark.asyncio
+async def test_search_drops_only_messages_deleted_between_list_and_fetch() -> None:
+    service = _failing_service(["m1", "m2", "m3"], {"m2": _GmailHttpError(404, "<HttpError 404 ... Not Found>")})
+
+    messages = await _client(service).search_messages("in:inbox", max_results=3)
+
+    assert [m.message_id for m in messages] == ["m1", "m3"]
+
+
+@pytest.mark.asyncio
+async def test_search_refuses_to_return_a_partial_result_when_gmail_rate_limits() -> None:
+    """Seen live: a 50-message search silently came back with 6. The agent
+    would have presented that as the complete inbox."""
+    from mailpilot.gmail.client import GmailSearchIncompleteError
+
+    quota = _GmailHttpError(403, "<HttpError 403 ... \"Quota exceeded for quota metric 'Total Query Cost'\" rateLimitExceeded>")
+    service = _failing_service(["m1", "m2", "m3"], {"m2": quota, "m3": quota})
+
+    with pytest.raises(GmailSearchIncompleteError, match="matched 3 message\\(s\\) but 2 could not be fetched") as info:
+        await _client(service).search_messages("in:inbox", max_results=3)
+
+    # Each fetch already retried; re-running the whole search would only burn
+    # more of a per-minute quota, so the tool layer must not retry it either.
+    from mailpilot.resilience import ErrorClass, classify_error
+
+    assert classify_error(info.value) is ErrorClass.PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_search_stops_fetching_once_a_rate_limit_is_confirmed() -> None:
+    """Seen live: 13 failing fetches each spent their own 7s of backoff -> a
+    43s search. After the first confirmed rate limit the rest fail at once."""
+    from mailpilot.config import Settings
+    from mailpilot.gmail.client import GmailSearchIncompleteError
+
+    quota = _GmailHttpError(403, "<HttpError 403 ... rateLimitExceeded>")
+    ids = [f"m{i}" for i in range(12)]
+    service = _failing_service(ids, {mid: quota for mid in ids[2:]})
+    client = GoogleGmailClient(Settings(_env_file=None, gmail_max_retries=0, gmail_max_concurrent_fetches=1))
+    client._get_service = lambda: service  # type: ignore[method-assign]
+    client._new_http = lambda: object()  # type: ignore[method-assign]
+
+    with pytest.raises(GmailSearchIncompleteError, match="10 could not be fetched"):
+        await client.search_messages("in:inbox", max_results=12)
+
+    messages = service._users._messages
+    assert messages.get_calls == 3  # m0, m1 fetched; m2 hit the limit; m3..m11 never asked Gmail
+
+
+@pytest.mark.asyncio
+async def test_search_never_fetches_more_bodies_at_once_than_configured() -> None:
+    import asyncio
+
+    from mailpilot.config import Settings
+
+    in_flight = {"now": 0, "peak": 0}
+
+    class _SlowMessages(_Messages):
+        def get(self, *, id: str, **_: Any) -> _Request:  # noqa: A002
+            return super().get(id=id)
+
+    service = _Service([f"m{i}" for i in range(12)])
+    client = GoogleGmailClient(Settings(_env_file=None, gmail_max_retries=0, gmail_max_concurrent_fetches=3))
+    client._get_service = lambda: service  # type: ignore[method-assign]
+    client._new_http = lambda: object()  # type: ignore[method-assign]
+
+    original_run = client._run
+
+    async def counting_run(fn):  # type: ignore[no-untyped-def]
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        try:
+            await asyncio.sleep(0.01)
+            return await original_run(fn)
+        finally:
+            in_flight["now"] -= 1
+
+    client._run = counting_run  # type: ignore[method-assign]
+
+    messages = await client.search_messages("in:inbox", max_results=12)
+
+    assert len(messages) == 12
+    assert in_flight["peak"] <= 3 + 1  # +1: the initial list call is not throttled

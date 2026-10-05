@@ -301,43 +301,85 @@ covering different angles — see findings section below):
 
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 
-5. **ChromaDB calls block the event loop.** `rag/chroma_service.py` calls
-   `self._collection.upsert(...)` / `.query(...)` / `.count()` directly
-   inside `async def` methods — these are synchronous SQLite/HNSW-backed
-   calls that will stall the FastAPI event loop for the duration of every
-   ingest/query. Fix: wrap each in `asyncio.to_thread(...)`, matching the
-   pattern already established in `gmail/google_client.py`.
-6. **`ingest_thread` embeds once per message instead of batching.** Currently
-   loops `for message in thread.messages: ... await
-   self._embedding_function.embed_documents(chunks)` — one Gemini API call
-   per message. Fix: collect all chunks (and their per-chunk metadata) from
-   every message first, then issue **one** `embed_documents()` call for the
-   whole thread. While in there, factor the shared "chunk → sanitize
-   metadata → embed → upsert" sequence between `ingest_thread` and
-   `ingest_document` into a small private helper to remove the duplication
-   (both do the same 4 steps with different id-prefix/metadata).
-7. **`AgentLimits` is hand-mapped field-by-field in `api/deps.py`** from
-   `Settings`, which is also hand-mapped from the `AgentLimits` dataclass
-   fields — three parallel structures with the same six field names
-   (`config.py` `Settings`, `agent/graph.py` `AgentLimits`, `api/deps.py`'s
-   `get_agent()`). A typo'd field name in the `deps.py` mapping fails
-   silently by falling back to `AgentLimits`'s default. Fix: add a
-   classmethod `AgentLimits.from_settings(settings: Settings) -> AgentLimits`
-   in `agent/graph.py` (or accept `Settings` directly in `build_agent_graph`)
-   so there's one mapping site, not two.
-8. **Tool argument validation hardening**: add `min_length=1` (or
-   equivalent non-empty constraints) to string/list fields across the MCP
-   tool `args_schema` classes that currently accept empty strings/lists
-   silently (`message_id`, `thread_id`, `label_id`, `draft_id`, `query`,
-   `to` list, etc. across `search_emails.py`, `read_email.py`,
-   `read_thread.py`, `apply_label.py`, `create_draft.py`, `send_email.py`,
-   `classify_email.py`, `summarize_thread.py`, `extract_tasks.py`,
-   `draft_grounded_reply.py`). Quick, mechanical, low-risk — was in progress
-   when this session paused (see `grep -n "Field(\.\.\." src/mailpilot/mcp/tools/*.py`
-   output captured earlier in this session for the exact line list).
-9. **`datetime.utcnow()` is deprecated** (Python 3.12+) in `schemas/agent.py`
-   (`AgentPlan.created_at`) and `schemas/audit.py` (`AuditRecord.timestamp`).
-   Fix: switch both to `datetime.now(timezone.utc)`.
+5. DONE (2026-10-05) -- `rag/chroma_service.py`: `count`/`query`/`upsert` now run via
+   `asyncio.to_thread`.
+6. DONE (2026-10-05) -- `ingest_thread` collects every message's chunks first and
+   makes ONE `embed_documents()` call; shared `_embed_and_upsert()` helper for
+   thread + document ingest. Test asserts a single embedding batch for a
+   3-message thread.
+7. DONE (2026-10-05) -- `AgentLimits.from_settings(settings)` maps every field by
+   the `agent_<field>` naming convention (`fields(cls)` + `getattr`), so a limit
+   without a setting fails loudly; `api/deps.py` uses it. Test guards the
+   convention.
+8. DONE (2026-10-05) -- `min_length=1` on every required id/query/intent field
+   across the tool arg schemas; parametrized test over all 8 tools.
+9. DONE (2026-10-05) -- `datetime.now(timezone.utc)` in `schemas/agent.py` and
+   `schemas/audit.py`; `tests/test_schemas.py`.
+
+### C2. Model-call resilience (2026-10-05) -- DONE
+
+Found live: a single transient 503 from Gemini killed the whole run with a 500.
+- `resilience.py`: `status_code()` walks the `__cause__` chain (LangChain's
+  Gemini wrapper raises its own error types *from* `google.genai` errors that
+  carry `.code`; `ollama.ResponseError.status_code`); `retry_after_seconds()`
+  parses Google's "Please retry in 11h27m32s" / `retryDelay`; a 429 whose
+  suggested wait exceeds `MAX_RETRY_AFTER_SECONDS` (60s, i.e. a daily quota) is
+  PERMANENT, a short one is TRANSIENT and the wait is honoured;
+  `is_retryable` (langchain_core ModelError) honoured; httpx error names and
+  "high demand"/"try again later" tokens added; `with_retries(deadline=...)`
+  never sleeps past the run's wall-clock budget; `describe_error()`.
+- `agent/graph.py`: `agent_node` wraps the model call in
+  `with_retries(with_timeout(...))` using new `AgentLimits.max_llm_retries` /
+  `llm_retry_base_delay_seconds` / `llm_timeout_seconds` (settings
+  `AGENT_MAX_LLM_RETRIES`, `AGENT_LLM_RETRY_BASE_DELAY_SECONDS`,
+  `AGENT_LLM_TIMEOUT_SECONDS`). A model call that still fails ends the run via
+  the (renamed) `terminate` node -> `AgentRunStatus.FAILED`, final_response
+  "Stopping this run: the language model call failed: ...", audit tool_name
+  `__llm_error__` (`TERMINATION_AUDIT_NAMES`; limits still `__execution_limit__`).
+  `AgentGraph` now carries `limits` + `sleep`.
+- `agent/langgraph_agent.py`: `_invoke_model()` applies the same policy to
+  `plan()` and to `resume()`'s wrap-up call. If that wrap-up call fails AFTER an
+  approved send, the result is still COMPLETED with text stating the action was
+  executed, `__llm_error__` audited, and the graph state advanced (no 500, no
+  phantom "no pending approval" on a client retry). Test covers it.
+- Verified live: real daily-quota 429 classifies PERMANENT (no retry sleep) and
+  the run ends FAILED in ~1s with a readable reason; a real read-only run on
+  gemini-3.6-flash completes through the wrapper.
+- Still open (D16): a global exception handler for anything else unhandled.
+
+### C3. Two more found while verifying C2 live (2026-10-05) -- DONE
+
+- **Gemini client's own retries.** `ChatGoogleGenerativeAI.max_retries` defaults
+  to 6 -> google-genai `HttpRetryOptions(attempts=6)` retrying 429/503 with
+  ~31s of exponential backoff *inside* the client, before our layer sees
+  anything. A daily-quota 429 therefore took 35.9s to surface. Fix:
+  `llm/providers.py` builds the Gemini model with `max_retries=1` (the SDK
+  treats 0 as "use defaults"; the LangChain docstring itself says set 1 and do
+  custom retries). `mailpilot.resilience` is now the only retry layer;
+  `agent_max_llm_retries` default raised 2 -> 3 to compensate (2s, 4s, 8s).
+- **Gmail per-minute query-cost quota.** Bursts of concurrent `messages.get`
+  calls get `403 Forbidden` reason `rateLimitExceeded` ("Quota exceeded for
+  quota metric 'Total Query Cost' and limit 'Units per minute per user'").
+  `classify_error` treated every 403 as PERMANENT, and `search_messages`
+  silently dropped the failed fetches: a 50-message search returned 6, and
+  the agent would have presented that as the whole inbox. Fixes:
+  `resilience.is_rate_limited()` (429, or 403 with rate-limit wording) ->
+  TRANSIENT; "Retry after <ISO timestamp>" parsed into `retry_after_seconds`;
+  `search_messages` throttles body fetches with a semaphore
+  (`GMAIL_MAX_CONCURRENT_FETCHES=5`), drops a message ONLY on 404 (deleted
+  between list and get), and otherwise raises `GmailSearchIncompleteError`
+  (cause chained) instead of returning a partial list. Gmail retry defaults
+  `GMAIL_MAX_RETRIES=3`, base delay 1.0s. `search_emails` tool default
+  `max_results` 25 -> 10, max 100 -> 50 (every result costs quota).
+  Tests in `tests/gmail/test_google_client.py`, `tests/test_resilience.py`.
+  Live re-check: 4x25 complete (~5s each, throttled); a 50-search under a
+  saturated quota raised the incomplete error instead of returning 37/50; the
+  next 50-search (window moved on) fetched 50/50 in 9.5s. Refinement after
+  that run (the failing search took 43s because each of 13 failing fetches
+  spent its own backoff): once one fetch confirms a rate limit the queued
+  fetches fail immediately, and `GmailSearchIncompleteError.is_retryable =
+  False` so `tools_node` doesn't re-run the whole search against the same
+  quota -- the agent sees the error at once.
 
 ### D. Not yet started at all (full Phase 5 checklist items)
 

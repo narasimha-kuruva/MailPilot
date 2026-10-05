@@ -97,7 +97,14 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
     if settings.llm_provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        return ChatGoogleGenerativeAI(model=settings.gemini_model, google_api_key=_require_google_api_key(settings))
+        # max_retries=1 disables the client's own retries (6 by default, with
+        # ~30s of backoff -- it retried a daily-quota 429 five times before
+        # giving up). `mailpilot.resilience` is the single retry layer: it
+        # knows a daily quota from a rate limit and respects the run's
+        # deadline. 1, not 0: the SDK treats 0 as "use my defaults".
+        return ChatGoogleGenerativeAI(
+            model=settings.gemini_model, google_api_key=_require_google_api_key(settings), max_retries=1
+        )
 
     if settings.llm_provider == "ollama":
         from langchain_ollama import ChatOllama

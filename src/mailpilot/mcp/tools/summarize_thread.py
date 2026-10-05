@@ -13,7 +13,7 @@ from mailpilot.schemas.intelligence import ThreadSummary
 
 
 class SummarizeThreadArgs(BaseModel):
-    thread_id: str = Field(..., description="Gmail thread ID, as returned by search_emails.")
+    thread_id: str = Field(..., min_length=1, description="Gmail thread ID, as returned by search_emails.")
 
 
 class SummarizeThreadTool(MCPTool):

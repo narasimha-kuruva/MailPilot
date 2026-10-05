@@ -35,10 +35,10 @@ from googleapiclient.discovery import build
 
 from mailpilot.config import Settings
 from mailpilot.gmail.auth import load_credentials
-from mailpilot.gmail.client import GmailClient
+from mailpilot.gmail.client import GmailClient, GmailSearchIncompleteError
 from mailpilot.gmail.mime_utils import build_raw_draft, parse_message
 from mailpilot.logging_config import get_logger
-from mailpilot.resilience import with_retries
+from mailpilot.resilience import describe_error, is_rate_limited, status_code, with_retries
 from mailpilot.schemas.email import (
     CreatedDraft,
     DraftEmail,
@@ -105,22 +105,65 @@ class GoogleGmailClient(GmailClient):
         if not message_ids:
             return []
 
-        # Fetch each message's full body concurrently (across the default
-        # thread pool). A single message that fails to fetch (e.g. deleted
-        # between the list and get calls) is dropped with a warning rather
-        # than failing the whole search.
-        results = await asyncio.gather(
-            *(self._run(lambda mid=mid: _get_one(mid)) for mid in message_ids), return_exceptions=True
-        )
+        # Fetch message bodies concurrently, but throttled: Gmail meters
+        # query cost per user per minute and answers bursts with a 403
+        # rateLimitExceeded (seen live: a 50-message search came back with 6).
+        # Each fetch is retried with backoff by `_run`.
+        semaphore = asyncio.Semaphore(max(1, self._settings.gmail_max_concurrent_fetches))
+        # Once one fetch has exhausted its retries on a rate limit, the quota
+        # window is simply gone: the fetches still queued fail immediately
+        # instead of each spending their own backoff discovering the same thing.
+        rate_limit_hit: dict[str, BaseException | None] = {"error": None}
+
+        async def _fetch(message_id: str) -> EmailMessage:
+            async with semaphore:
+                if rate_limit_hit["error"] is not None:
+                    raise rate_limit_hit["error"]
+                try:
+                    return await self._run(lambda: _get_one(message_id))
+                except Exception as exc:
+                    if rate_limit_hit["error"] is None and is_rate_limited(exc):
+                        rate_limit_hit["error"] = exc
+                    raise
+
+        results = await asyncio.gather(*(_fetch(mid) for mid in message_ids), return_exceptions=True)
+
         messages: list[EmailMessage] = []
+        failures: list[tuple[str, BaseException]] = []
         for message_id, result in zip(message_ids, results):
             if isinstance(result, BaseException):
-                logger.warning(
-                    "Skipping message that failed to fetch during search",
-                    extra={"extra_fields": {"message_id": message_id, "error": str(result)}},
-                )
+                if status_code(result) == 404:
+                    # Deleted between the list and the fetch: genuinely gone,
+                    # so leaving it out IS the complete answer.
+                    logger.warning(
+                        "Skipping message deleted between search listing and fetch",
+                        extra={"extra_fields": {"message_id": message_id}},
+                    )
+                    continue
+                failures.append((message_id, result))
                 continue
             messages.append(result)
+
+        if failures:
+            # Anything else means the result would be silently incomplete and
+            # the agent would present it as the whole truth. Fail loudly instead.
+            _, first_error = failures[0]
+            logger.warning(
+                "Search could not fetch every matching message",
+                extra={
+                    "extra_fields": {
+                        "query": query,
+                        "matched": len(message_ids),
+                        "failed": len(failures),
+                        "error": describe_error(first_error),
+                    }
+                },
+            )
+            raise GmailSearchIncompleteError(
+                f"Gmail search matched {len(message_ids)} message(s) but {len(failures)} could not be fetched "
+                f"({describe_error(first_error)}). Refusing to return a partial result; "
+                "try again shortly or with a smaller max_results."
+            )
         return messages
 
     async def get_message(self, message_id: str) -> EmailMessage:

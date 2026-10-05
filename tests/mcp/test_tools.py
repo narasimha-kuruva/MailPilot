@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
+from mailpilot.intelligence.gemini_service import GeminiIntelligenceService
 from mailpilot.mcp.tools.apply_label import ApplyLabelTool
 from mailpilot.mcp.tools.create_draft import CreateDraftTool
 from mailpilot.mcp.tools.list_labels import ListLabelsTool
@@ -11,9 +14,10 @@ from mailpilot.mcp.tools.read_thread import ReadThreadTool
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.mcp.tools.search_emails import SearchEmailsTool
 from mailpilot.mcp.tools.send_email import SendEmailTool
+from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.schemas.email import EmailSummary
 from mailpilot.safety.guardrails import GuardrailViolation
-from tests.fakes import FakeGmailClient
+from tests.fakes import FakeChatModel, FakeEmbeddingFunction, FakeGmailClient
 
 
 @pytest.mark.asyncio
@@ -137,3 +141,29 @@ def test_registry_builds_all_seven_tools_keyed_by_name() -> None:
         "create_draft",
         "send_email",
     }
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("search_emails", {"query": ""}),
+        ("read_email", {"message_id": ""}),
+        ("read_thread", {"thread_id": ""}),
+        ("send_email", {"draft_id": ""}),
+        ("classify_email", {"message_id": ""}),
+        ("summarize_thread", {"thread_id": ""}),
+        ("extract_tasks", {"thread_id": ""}),
+        ("draft_grounded_reply", {"thread_id": "t", "intent": ""}),
+    ],
+)
+def test_every_tool_rejects_empty_identifiers(tool_name: str, args: dict, tmp_path: Path) -> None:
+    """An empty id would otherwise reach Gmail and come back as an opaque 400."""
+    tools = build_tools(
+        FakeGmailClient(),
+        intelligence_service=GeminiIntelligenceService(FakeChatModel([])),
+        rag_service=ChromaRAGService(persist_dir=str(tmp_path / "chroma"), embedding_function=FakeEmbeddingFunction()),
+        chat_model=FakeChatModel([]),
+    )
+
+    with pytest.raises(ValidationError):
+        tools[tool_name].args_schema.model_validate(args)

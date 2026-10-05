@@ -30,9 +30,9 @@ from mailpilot.schemas.intelligence import DraftGroundedReplyResult
 
 
 class DraftGroundedReplyArgs(BaseModel):
-    thread_id: str = Field(..., description="Gmail thread ID to reply within.")
+    thread_id: str = Field(..., min_length=1, description="Gmail thread ID to reply within.")
     intent: str = Field(
-        ..., description="What the reply should accomplish, e.g. 'confirm the meeting time and next steps'."
+        ..., min_length=1, description="What the reply should accomplish, e.g. 'confirm the meeting time and next steps'."
     )
 
 

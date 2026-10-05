@@ -21,7 +21,7 @@ from mailpilot.schemas.email import EmailMessage
 
 
 class SendEmailArgs(BaseModel):
-    draft_id: str = Field(..., description="ID of a draft previously created with create_draft.")
+    draft_id: str = Field(..., min_length=1, description="ID of a draft previously created with create_draft.")
 
 
 class SendEmailTool(MCPTool):

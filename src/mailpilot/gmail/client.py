@@ -19,6 +19,19 @@ from mailpilot.schemas.email import (
 )
 
 
+class GmailSearchIncompleteError(RuntimeError):
+    """A search matched messages that could not all be fetched (rate limit,
+    server error). Raised instead of returning a partial list that the agent
+    would present as the complete answer.
+
+    Not retryable at the tool level: every fetch already had its own
+    retries, and re-running the whole search against a per-minute quota
+    only burns more of it. The agent sees the error at once and can say so.
+    """
+
+    is_retryable = False  # honoured by mailpilot.resilience.classify_error
+
+
 class GmailClient(ABC):
     """Interface for Gmail read/write operations."""
 

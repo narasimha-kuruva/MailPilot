@@ -18,7 +18,7 @@ from mailpilot.schemas.email import EmailMessage
 
 
 class ReadEmailArgs(BaseModel):
-    message_id: str = Field(..., description="Gmail message ID, as returned by search_emails.")
+    message_id: str = Field(..., min_length=1, description="Gmail message ID, as returned by search_emails.")
 
 
 class ReadEmailTool(MCPTool):

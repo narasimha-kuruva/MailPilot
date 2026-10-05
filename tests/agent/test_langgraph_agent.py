@@ -55,7 +55,7 @@ async def test_run_executes_non_sensitive_tool_and_completes() -> None:
 
     assert state.status == AgentRunStatus.COMPLETED
     assert state.final_response == "You have 1 unread email from Alice."
-    assert ("search_messages", ("is:unread", 25)) in gmail_client.calls
+    assert ("search_messages", ("is:unread", 10)) in gmail_client.calls  # the tool's default max_results
 
     history = await audit_service.get_history("c1")
     assert len(history) == 1
@@ -259,3 +259,36 @@ def test_message_text_extracts_only_text_from_content_blocks() -> None:
 
     assert _message_text(message) == "Found 2 unread emails. Want me to summarise them?"
     assert _message_text(AIMessage(content="plain")) == "plain"
+
+
+@pytest.mark.asyncio
+async def test_resume_reports_the_send_even_when_the_follow_up_model_call_fails() -> None:
+    """If the wrap-up model call fails after an approved send, the caller must
+    still learn the email went out (and must not get a 500 that invites a
+    retry of /decision), and the conversation must stay usable afterwards."""
+    chat_model = FakeChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": "call_1"}]),
+            ValueError("model exploded"),  # permanent: no retries, no sleep
+            AIMessage(content="Still here."),
+        ]
+    )
+    agent, gmail_client, audit_service = _build_agent(chat_model)
+
+    await agent.run(AgentRequest(instruction="send the reply", conversation_id="c-llm-fail"))
+    state = await agent.resume("c-llm-fail", approved=True)
+
+    assert state.status == AgentRunStatus.COMPLETED
+    assert "send_email" in state.final_response
+    assert "executed successfully" in state.final_response
+    assert "model exploded" in state.final_response
+    assert gmail_client.sent_draft_ids == ["draft-1"]  # sent exactly once
+
+    history = await audit_service.get_history("c-llm-fail")
+    assert [r.tool_name for r in history][-2:] == ["send_email", "__llm_error__"]
+
+    # The conversation state was still advanced past the approval, so a
+    # follow-up instruction works normally.
+    follow_up = await agent.run(AgentRequest(instruction="what happened?", conversation_id="c-llm-fail"))
+    assert follow_up.status == AgentRunStatus.COMPLETED
+    assert follow_up.final_response == "Still here."

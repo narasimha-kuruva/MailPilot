@@ -18,13 +18,19 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mailpilot.agent.base import Agent
-from mailpilot.agent.graph import AgentGraph, PendingToolCall, initial_graph_state, serialize_result
+from mailpilot.agent.graph import (
+    TERMINATION_AUDIT_NAMES,
+    AgentGraph,
+    PendingToolCall,
+    initial_graph_state,
+    serialize_result,
+)
 from mailpilot.audit.service import AuditService
 from mailpilot.gmail.client import GmailClient
 from mailpilot.logging_config import get_logger
 from mailpilot.mcp.base import MCPTool
 from mailpilot.prompts import AGENT_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT
-from mailpilot.resilience import with_timeout
+from mailpilot.resilience import describe_error, with_retries, with_timeout
 from mailpilot.safety.approval import ApprovalService
 from mailpilot.schemas.agent import (
     AgentPlan,
@@ -100,6 +106,17 @@ class LangGraphAgent(Agent):
         # In-memory and single-process, matching the other Phase 2 services.
         self._pending_calls: dict[str, tuple[PendingToolCall, float]] = {}
 
+    async def _invoke_model(self, call: Callable[[], Any]) -> Any:
+        """One model call under the graph's LLM timeout/retry policy (see `agent_node`)."""
+        limits = self._agent_graph.limits
+        sleep_kwargs = {"sleep": self._agent_graph.sleep} if self._agent_graph.sleep is not None else {}
+        return await with_retries(
+            lambda: with_timeout(call, limits.llm_timeout_seconds),
+            max_retries=limits.max_llm_retries,
+            base_delay_seconds=limits.llm_retry_base_delay_seconds,
+            **sleep_kwargs,
+        )
+
     async def plan(self, request: AgentRequest) -> AgentPlan:
         """Decompose the request into an ordered list of sub-goals, without executing anything.
 
@@ -116,7 +133,7 @@ class LangGraphAgent(Agent):
             SystemMessage(content=PLANNING_SYSTEM_PROMPT.format(tool_catalog=tool_catalog)),
             HumanMessage(content=request.instruction),
         ]
-        outline = await structured.ainvoke(prompt)
+        outline = await self._invoke_model(lambda: structured.ainvoke(prompt))
         steps = [
             PlannedStep(step_id=str(index), description=text)
             for index, text in enumerate(outline.steps)
@@ -202,7 +219,45 @@ class LangGraphAgent(Agent):
 
         tool_message = ToolMessage(content=content, tool_call_id=pending.tool_call_id, name=pending.tool_name)
         history = [*snapshot.values["messages"], tool_message]
-        final_response: AIMessage = await self._agent_graph.llm_with_tools.ainvoke(history)
+        try:
+            final_response: AIMessage = await self._invoke_model(
+                lambda: self._agent_graph.llm_with_tools.ainvoke(history)
+            )
+        except Exception as exc:  # noqa: BLE001 - the decision's outcome above must survive this
+            # The approved action already ran (or was skipped) and is audited
+            # above. A wrap-up call that fails for good must not become a
+            # 500: the client would retry /decision, find no pending
+            # approval, and never learn that the email was in fact sent.
+            logger.error(
+                "Language model call failed after approval decision",
+                extra={"extra_fields": {"conversation_id": conversation_id, "error": describe_error(exc)}},
+            )
+            await self._audit_service.record(
+                AuditRecord(
+                    conversation_id=conversation_id,
+                    agent_request=instruction,
+                    tool_name=TERMINATION_AUDIT_NAMES["llm_error"],
+                    status=ToolCallStatus.FAILURE,
+                    result_summary=f"Model call after the approval decision failed: {describe_error(exc)}"[:500],
+                    approval_status=ApprovalStatus.NOT_REQUIRED,
+                )
+            )
+            self._agent_graph.graph.update_state(config, {"messages": [tool_message], "pending_approval": None})
+            if not approved:
+                outcome = "was not executed, as you decided"
+            elif status is ToolCallStatus.SUCCESS:
+                outcome = "was executed successfully"
+            else:
+                outcome = "was attempted but failed"
+            return AgentRunState(
+                conversation_id=conversation_id,
+                status=AgentRunStatus.COMPLETED,
+                final_response=(
+                    f"The '{pending.tool_name}' action {outcome} ({content[:200]}). "
+                    "The assistant could not compose a follow-up because the language model call failed: "
+                    f"{describe_error(exc)}. Submit a new instruction to continue."
+                ),
+            )
 
         final_text = _message_text(final_response)
         follow_up_calls = getattr(final_response, "tool_calls", None) or []

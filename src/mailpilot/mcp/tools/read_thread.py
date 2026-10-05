@@ -12,7 +12,7 @@ from mailpilot.schemas.email import EmailThread
 
 
 class ReadThreadArgs(BaseModel):
-    thread_id: str = Field(..., description="Gmail thread ID, as returned by search_emails.")
+    thread_id: str = Field(..., min_length=1, description="Gmail thread ID, as returned by search_emails.")
 
 
 class ReadThreadTool(MCPTool):

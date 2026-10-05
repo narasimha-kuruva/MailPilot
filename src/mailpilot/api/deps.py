@@ -107,14 +107,7 @@ def get_agent() -> Agent:
         max_context_chars=settings.rag_max_context_chars,
         own_email=settings.gmail_user_email,
     )
-    limits = AgentLimits(
-        max_steps=settings.agent_max_steps,
-        max_tool_calls=settings.agent_max_tool_calls,
-        max_tool_retries=settings.agent_max_tool_retries,
-        tool_timeout_seconds=settings.agent_tool_timeout_seconds,
-        max_execution_seconds=settings.agent_max_execution_seconds,
-        max_output_chars=settings.agent_max_output_chars,
-    )
+    limits = AgentLimits.from_settings(settings)
     graph = build_agent_graph(
         chat_model, tools, get_audit_service(), checkpointer=MemorySaver(), limits=limits
     )

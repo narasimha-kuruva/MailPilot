@@ -80,6 +80,7 @@ def test_gemini_builds_chat_model_and_embeddings_with_configured_names() -> None
 
     assert isinstance(chat_model, ChatGoogleGenerativeAI)
     assert chat_model.model.endswith("gemini-3.7-flash")
+    assert chat_model.max_retries == 1  # mailpilot.resilience is the only retry layer
     assert isinstance(embeddings, GeminiEmbeddingFunction)
 
 

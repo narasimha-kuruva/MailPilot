@@ -5,10 +5,19 @@ chunks (distinguished by the `source_type` metadata field), so a single
 similarity query ranks both kinds of context together -- see
 `mailpilot.agent.reply_drafting` for how retrieval results are then
 budgeted before going into a prompt.
+
+Chroma's client is synchronous (SQLite + HNSW on disk), so every call into
+it is offloaded with `asyncio.to_thread`, matching
+`mailpilot.gmail.google_client`; otherwise each ingest or query would stall
+the FastAPI event loop for its duration. Embeddings for a whole thread are
+requested in one batch rather than one call per message -- on a metered
+embedding API that is the difference between one request and one per
+message for every ingested thread.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import chromadb
@@ -21,12 +30,14 @@ from mailpilot.schemas.rag import RetrievedChunk
 
 _COLLECTION_NAME = "mailpilot_context"
 
+_Metadata = dict[str, str | int | float | bool]
 
-def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, str | int | float | bool]:
+
+def _sanitize_metadata(metadata: dict[str, Any]) -> _Metadata:
     """Chroma only accepts primitive metadata values. Drop `None`s and
     stringify anything else, rather than persisting arbitrary objects
     alongside a chunk."""
-    sanitized: dict[str, str | int | float | bool] = {}
+    sanitized: _Metadata = {}
     for key, value in metadata.items():
         if value is None:
             continue
@@ -50,13 +61,22 @@ class ChromaRAGService(RAGService):
             _COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
         )
 
+    async def _embed_and_upsert(self, ids: list[str], documents: list[str], metadatas: list[_Metadata]) -> None:
+        """The shared tail of every ingest: one embedding batch, one upsert, off the event loop."""
+        embeddings = await self._embedding_function.embed_documents(documents)
+        await asyncio.to_thread(
+            self._collection.upsert, ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings
+        )
+
     async def ingest_thread(self, thread: EmailThread) -> None:
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[_Metadata] = []
         for message in thread.messages:
             text = f"{message.subject}\n\n{message.body_text or message.snippet or ''}".strip()
             chunks = chunk_text(text, self._chunk_size, self._chunk_overlap)
             if not chunks:
                 continue
-            ids = [f"thread:{message.message_id}:{i}" for i in range(len(chunks))]
             metadata = _sanitize_metadata(
                 {
                     "source_type": "email_thread",
@@ -67,31 +87,34 @@ class ChromaRAGService(RAGService):
                     "timestamp": message.received_at.isoformat() if message.received_at else "",
                 }
             )
-            embeddings = await self._embedding_function.embed_documents(chunks)
-            self._collection.upsert(
-                ids=ids, documents=chunks, metadatas=[metadata] * len(chunks), embeddings=embeddings
-            )
+            for index, chunk in enumerate(chunks):
+                ids.append(f"thread:{message.message_id}:{index}")
+                documents.append(chunk)
+                metadatas.append(metadata)
+        if ids:
+            await self._embed_and_upsert(ids, documents, metadatas)
 
     async def ingest_document(self, document_id: str, text: str, metadata: dict) -> None:
         chunks = chunk_text(text, self._chunk_size, self._chunk_overlap)
         if not chunks:
             return
-        ids = [f"document:{document_id}:{i}" for i in range(len(chunks))]
         merged_metadata = _sanitize_metadata({**metadata, "source_type": "document", "document_id": document_id})
-        embeddings = await self._embedding_function.embed_documents(chunks)
-        self._collection.upsert(
-            ids=ids, documents=chunks, metadatas=[merged_metadata] * len(chunks), embeddings=embeddings
+        await self._embed_and_upsert(
+            [f"document:{document_id}:{index}" for index in range(len(chunks))],
+            chunks,
+            [merged_metadata] * len(chunks),
         )
 
     async def query(
         self, query: str, top_k: int = 5, where: dict[str, Any] | None = None
     ) -> list[RetrievedChunk]:
-        count = self._collection.count()
+        count = await asyncio.to_thread(self._collection.count)
         if count == 0:
             return []
 
         query_embedding = await self._embedding_function.embed_query(query)
-        results = self._collection.query(
+        results = await asyncio.to_thread(
+            self._collection.query,
             query_embeddings=[query_embedding],
             n_results=min(top_k, count),
             where=where,
