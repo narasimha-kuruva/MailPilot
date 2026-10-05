@@ -255,6 +255,17 @@ covering different angles — see findings section below):
   retried; check the message for "quota" / RetryInfo before retrying).
 - `GMAIL_USER_EMAIL` is set; `secrets/client_secret.json` still missing.
 
+- ✅ **Live Gmail bug found & fixed (2026-10-05):** `googleapiclient`'s service
+  object shares one `httplib2.Http`, which is not thread-safe. `search_messages`'
+  concurrent per-message fetch (`asyncio.gather` over `to_thread`) collided on it
+  -> sporadic `SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC`, silently dropped as
+  "failed to fetch" (lost ~50% of results; `is:unread` returned 0 of 3).
+  Fix: `GoogleGmailClient._execute(request)` runs every request with a fresh
+  `AuthorizedHttp(creds, httplib2.Http())`; all 10 call sites go through it.
+  Verified live: 35/35 fetched across three searches. Test:
+  `tests/gmail/test_google_client.py` (stub service asserts distinct http per
+  request). OAuth consent flow + token refresh also verified live.
+
 ### C. Quality/efficiency fixes (lower priority, do if time remains)
 
 5. **ChromaDB calls block the event loop.** `rag/chroma_service.py` calls
