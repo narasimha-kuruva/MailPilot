@@ -69,3 +69,30 @@ def find_unsupported_claims(draft_body: str, source_texts: list[str]) -> list[st
                 notes.append(f"Draft mentions a {label} ('{match}') not found in the source thread or retrieved context.")
 
     return notes
+
+
+# Gmail system labels whose IDs are literal strings (not opaque ids). Applying
+# either of these removes a message from the user's normal view -- TRASH
+# auto-deletes after 30 days, SPAM hides it -- which is effectively a
+# destructive action with no undo prompt. Other system labels (INBOX,
+# STARRED, UNREAD, IMPORTANT, CATEGORY_*) only organise, so they stay allowed.
+DANGEROUS_LABEL_IDS = frozenset({"TRASH", "SPAM"})
+
+
+def assert_label_is_safe(label_id: str) -> None:
+    """Refuse to apply a label that hides or deletes mail from the user.
+
+    This is a hard block, not an approval gate (contrast
+    `mailpilot.safety.policy.SENSITIVE_TOOL_NAMES`): a hallucinating or
+    prompt-injected agent calling `apply_label(msg, "TRASH")` should simply
+    fail, the same way `validate_reply_recipients` rejects an injected
+    recipient. Trashing mail is not something MailPilot does on anyone's
+    behalf, so there's nothing for a human to approve.
+
+    Raises `GuardrailViolation` for `TRASH`/`SPAM` (case-insensitive).
+    """
+    if label_id.strip().upper() in DANGEROUS_LABEL_IDS:
+        raise GuardrailViolation(
+            f"Refusing to apply label '{label_id}': it would hide or delete the message. "
+            "MailPilot never trashes or marks mail as spam automatically."
+        )

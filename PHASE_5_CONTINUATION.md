@@ -182,7 +182,9 @@ covering different angles — see findings section below):
 
 ### A. Safety fixes still pending (from code review findings, not yet done)
 
-1. **`create_draft` has no recipient validation.** Only
+1. ✅ **DONE** (already implemented in code before this session resumed -- see
+   `mcp/tools/create_draft.py`; the note below is stale.)
+   ~~**`create_draft` has no recipient validation.**~~ Only
    `draft_grounded_reply` calls `validate_reply_recipients()` — the
    standalone `create_draft` MCP tool (`mcp/tools/create_draft.py`) lets the
    agent draft to *any* address with zero checking. Fix: in
@@ -201,25 +203,15 @@ covering different angles — see findings section below):
    participants don't include the requested recipient → raises/fails with
    a guardrail message; a matching recipient succeeds.
 
-2. **`apply_label` has no protection against dangerous system labels.**
-   Currently *any* label can be applied automatically (no approval gate at
-   all — `SENSITIVE_TOOL_NAMES` only contains `send_email`). An
-   injected/hallucinating agent calling `apply_label(message_id, "TRASH")`
-   or `"SPAM"` effectively hides/deletes a message from the user's view with
-   no human check. Fix: add a small guardrail in `mcp/tools/apply_label.py`
-   (or a new function in `safety/guardrails.py`, e.g.
-   `assert_label_is_safe(label_id: str)`) that rejects (raises
-   `GuardrailViolation`) a hardcoded denylist of dangerous system label IDs:
-   `{"TRASH", "SPAM"}` (Gmail's system label IDs are literally these
-   strings, not opaque IDs, for system labels — verify this is still
-   accurate against Gmail API docs if you have network access; if unsure,
-   keep the denylist but note it may need adjusting). Do NOT add these to
-   `SENSITIVE_TOOL_NAMES` (that would require a full human-approval round
-   trip for something that should just be an outright block, not a
-   confirm-first action — a hard guardrail is the right shape here, matching
-   how `validate_reply_recipients` works: reject, don't ask).
-   Add a test: `apply_label(message_id, "TRASH")` raises; a normal label
-   like `"INBOX"` or a custom label succeeds.
+2. ✅ **DONE (2026-10-05)** -- `apply_label` dangerous-label guardrail.
+   `safety/guardrails.py` gained `DANGEROUS_LABEL_IDS = {"TRASH", "SPAM"}` and
+   `assert_label_is_safe(label_id)` (case-insensitive, raises
+   `GuardrailViolation`). `mcp/tools/apply_label.py` calls it before touching
+   Gmail; its args now also have `min_length=1`. Hard block, not an approval
+   gate, as planned. `classify_error()` treats the violation as PERMANENT so
+   `tools_node` won't retry it. Tests: `tests/safety/test_guardrails.py`
+   (reject/allow parametrized) and `tests/mcp/test_tools.py`
+   (`FakeGmailClient` never receives the call). Suite: 88 passed.
 
 ### B. Correctness bugs found by review, not yet fixed
 

@@ -11,6 +11,7 @@ from mailpilot.mcp.tools.read_thread import ReadThreadTool
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.mcp.tools.search_emails import SearchEmailsTool
 from mailpilot.mcp.tools.send_email import SendEmailTool
+from mailpilot.safety.guardrails import GuardrailViolation
 from tests.fakes import FakeGmailClient
 
 
@@ -54,6 +55,25 @@ async def test_list_labels_and_apply_label() -> None:
     assert labels[0].label_id == "INBOX"
     assert outcome == {"status": "applied", "message_id": "msg-1", "label_id": "INBOX"}
     assert ("apply_label", ("msg-1", "INBOX")) in client.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label_id", ["TRASH", "SPAM"])
+async def test_apply_label_refuses_trash_and_spam_before_touching_gmail(label_id: str) -> None:
+    """The guardrail is a hard block in the tool, not an approval round-trip:
+    the Gmail client must never even be asked."""
+    client = FakeGmailClient()
+
+    with pytest.raises(GuardrailViolation):
+        await ApplyLabelTool(client).run(message_id="msg-1", label_id=label_id)
+
+    assert not any(name == "apply_label" for name, _ in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_apply_label_rejects_empty_ids() -> None:
+    with pytest.raises(ValidationError):
+        await ApplyLabelTool(FakeGmailClient()).run(message_id="", label_id="INBOX")
 
 
 @pytest.mark.asyncio

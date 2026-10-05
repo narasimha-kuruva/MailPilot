@@ -4,6 +4,7 @@ import pytest
 
 from mailpilot.safety.guardrails import (
     GuardrailViolation,
+    assert_label_is_safe,
     find_unsupported_claims,
     validate_reply_recipients,
 )
@@ -58,3 +59,15 @@ def test_find_unsupported_claims_allows_facts_present_in_sources() -> None:
     notes = find_unsupported_claims(draft_body, sources)
 
     assert notes == []
+
+
+@pytest.mark.parametrize("label_id", ["TRASH", "SPAM", "trash", " Spam "])
+def test_assert_label_is_safe_rejects_destructive_system_labels(label_id: str) -> None:
+    """An agent must never be able to make mail disappear via apply_label."""
+    with pytest.raises(GuardrailViolation, match="hide or delete"):
+        assert_label_is_safe(label_id)
+
+
+@pytest.mark.parametrize("label_id", ["INBOX", "STARRED", "IMPORTANT", "UNREAD", "Label_42"])
+def test_assert_label_is_safe_allows_organisational_labels(label_id: str) -> None:
+    assert_label_is_safe(label_id)  # must not raise
