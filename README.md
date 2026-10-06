@@ -91,6 +91,7 @@ endpoint from the browser.
 |---|---|
 | `POST /api/v1/agent/run` | Submit an instruction: `{"instruction": "...", "conversation_id": "optional"}`. Returns the run's state. |
 | `POST /api/v1/agent/{conversation_id}/decision` | Approve or reject the action a run is waiting on: `{"approved": true}`. |
+| `POST /api/v1/agent/plan` | Preview the steps the agent would take for an instruction (same body as `/run`). Nothing runs; the mailbox and the conversation are untouched. |
 | `GET /api/v1/agent/{conversation_id}/audit` | Every tool call in the conversation, with arguments, outcome, approval and timing. |
 | `GET /api/v1/metrics` | Counters since start: runs, tool calls, approvals, model calls, and tokens. |
 | `/api/v1/context/...` | The knowledge store behind grounded replies: index threads and documents, remove them, see counts (see [Retrieval](#retrieval-rag)). |
@@ -242,9 +243,9 @@ first, then execute" engine was considered and rejected. A plan made
 before any mail has been read can't know whether a search finds anything,
 or whether an email is urgent. Branching ("is it urgent? then draft")
 comes from the model reasoning over actual tool results, with the system
-prompt and tool descriptions guiding it. `Agent.plan()` exists as a
-preview: it returns an ordered list of sub-goals and executes nothing. It
-is not exposed over the API yet.
+prompt and tool descriptions guiding it. `POST /agent/plan` gives a
+preview: an ordered list of sub-goals, with nothing executed, read or
+recorded. `/run` doesn't follow it as a script.
 
 ### LangChain vs LangGraph
 
@@ -536,7 +537,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 325 unit tests, no network
+pytest                                                       # 327 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
