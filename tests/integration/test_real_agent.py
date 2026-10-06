@@ -16,7 +16,7 @@ WRITE_TOOLS = {"apply_label", "create_draft", "draft_grounded_reply", "send_emai
 @pytest.mark.asyncio
 async def test_read_only_request_completes_against_the_real_inbox(gmail_client, chat_model) -> None:
     # The fixtures fail fast, with a clear message, if credentials are missing.
-    agent = get_agent()
+    agent = await get_agent()
 
     state = await agent.run(
         AgentRequest(

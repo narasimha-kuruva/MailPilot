@@ -167,7 +167,7 @@ async def test_agent_run_feeds_the_registry_end_to_end() -> None:
 class _ExplodingGraph:
     """Stands in for the compiled graph: the conversation is new, then the run itself raises."""
 
-    def get_state(self, config: dict) -> SimpleNamespace:
+    async def aget_state(self, config: dict) -> SimpleNamespace:
         return SimpleNamespace(values={})
 
     async def ainvoke(self, state: dict, config: dict) -> dict:

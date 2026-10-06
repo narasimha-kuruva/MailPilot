@@ -26,14 +26,16 @@ same draft concurrently (see `LangGraphAgent._execute_approved`). Keys are
 built from the arguments after schema validation, so fields the tool
 ignores can't make one send look like two.
 
-State is in memory and per process, like the other services in this
-phase, and lives as long as the process: one entry per approved action.
+Completed actions live in a `CompletedActionStore`: in memory by default,
+or SQLite (`mailpilot.persistence.sqlite`) so a send that went out is still
+known after a restart. In-flight reservations are always in memory: they
+describe work this process is doing right now.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Protocol
 
 
 def idempotency_key(tool_name: str, tool_args: dict[str, Any]) -> str:
@@ -41,9 +43,29 @@ def idempotency_key(tool_name: str, tool_args: dict[str, Any]) -> str:
     return f"{tool_name}:{json.dumps(tool_args, sort_keys=True, default=str)}"
 
 
-class IdempotencyGuard:
+class CompletedActionStore(Protocol):
+    """Synchronous on purpose -- see `IdempotencyGuard.try_begin`. A local
+    SQLite lookup takes microseconds, so blocking the event loop for it is fine."""
+
+    def get(self, key: str) -> str | None: ...
+
+    def put(self, key: str, result_summary: str) -> None: ...
+
+
+class InMemoryCompletedActions:
     def __init__(self) -> None:
-        self._completed: dict[str, str] = {}
+        self._results: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self._results.get(key)
+
+    def put(self, key: str, result_summary: str) -> None:
+        self._results[key] = result_summary
+
+
+class IdempotencyGuard:
+    def __init__(self, completed: CompletedActionStore | None = None) -> None:
+        self._completed = completed if completed is not None else InMemoryCompletedActions()
         self._in_flight: set[str] = set()
 
     def try_begin(self, key: str) -> bool:
@@ -52,14 +74,14 @@ class IdempotencyGuard:
         Synchronous on purpose: with no `await` between the check and the
         reservation, two coroutines can't both pass it.
         """
-        if key in self._completed or key in self._in_flight:
+        if key in self._in_flight or self._completed.get(key) is not None:
             return False
         self._in_flight.add(key)
         return True
 
     def complete(self, key: str, result_summary: str) -> None:
+        self._completed.put(key, result_summary)
         self._in_flight.discard(key)
-        self._completed[key] = result_summary
 
     def abandon(self, key: str) -> None:
         """The action failed: release the reservation without marking it done."""

@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from mailpilot.api.deps import get_persistent_state, reset_agent
 from mailpilot.api.middleware import request_context
 from mailpilot.api.routes.agent import router as agent_router
 from mailpilot.api.routes.context import router as context_router
@@ -33,6 +34,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     yield
     logger.info("MailPilot shutting down")
+    # Close the SQLite state if a request opened it (flushes the WAL cleanly).
+    reset_agent()
+    if get_persistent_state.cache_info().currsize:
+        state = get_persistent_state()
+        if state is not None:
+            await state.close()
+        get_persistent_state.cache_clear()
 
 
 def create_app() -> FastAPI:

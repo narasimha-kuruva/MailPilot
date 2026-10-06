@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     gmail_retry_base_delay_seconds: float = 1.0  # 1s, 2s, 4s
     gmail_max_concurrent_fetches: int = 5  # message bodies fetched in parallel per search
 
+    # --- Persistence ---
+    # sqlite (default): conversations, pending approvals, the audit trail and
+    # completed sends survive a restart (files under STATE_DIR; see
+    # mailpilot.persistence.sqlite). memory: all of it is lost on restart.
+    state_backend: Literal["sqlite", "memory"] = "sqlite"
+    state_dir: str = "./data/state"
+
     # --- Observability (Phase 5.7) ---
     # Per-token prices for the cost estimate in GET /api/v1/metrics. 0 (the
     # default) turns the estimate off: prices change and differ by plan, so

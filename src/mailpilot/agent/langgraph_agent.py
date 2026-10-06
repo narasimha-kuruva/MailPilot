@@ -19,10 +19,10 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mailpilot.agent.base import Agent
+from mailpilot.agent.pending import InMemoryPendingCallStore, PendingCallStore, PendingToolCall
 from mailpilot.agent.graph import (
     TERMINATION_AUDIT_NAMES,
     AgentGraph,
-    PendingToolCall,
     fence_tool_output,
     initial_graph_state,
     serialize_result,
@@ -93,9 +93,10 @@ class LangGraphAgent(Agent):
         approval_ttl_seconds: float = 1800.0,
         tool_timeout_seconds: float = 30.0,
         gmail_client: GmailClient | None = None,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
         idempotency_guard: IdempotencyGuard | None = None,
         metrics: MetricsRegistry | None = None,
+        pending_store: PendingCallStore | None = None,
     ) -> None:
         self._agent_graph = agent_graph
         self._tools = tools
@@ -107,10 +108,12 @@ class LangGraphAgent(Agent):
         # show the real To/Subject/Body of a draft before someone approves
         # sending it) -- never to execute anything itself.
         self._gmail_client = gmail_client
+        # Wall-clock seconds: approval expiry must survive a restart when the
+        # pending store is persistent.
         self._clock = clock
-        # conversation_id -> (pending call, monotonic time it was requested).
-        # In-memory and single-process, matching the other Phase 2 services.
-        self._pending_calls: dict[str, tuple[PendingToolCall, float]] = {}
+        # conversation_id -> (pending call, when it was requested). In memory
+        # unless a persistent store is passed (see mailpilot.persistence).
+        self._pending_store = pending_store or InMemoryPendingCallStore()
         # Shared by every conversation: an approved action runs at most once
         # (Phase 5.5, see mailpilot.safety.idempotency).
         self._idempotency = idempotency_guard or IdempotencyGuard()
@@ -156,7 +159,7 @@ class LangGraphAgent(Agent):
         conversation_id = request.conversation_id or str(uuid4())
         config = {"configurable": {"thread_id": conversation_id}}
 
-        existing = self._agent_graph.graph.get_state(config)
+        existing = await self._agent_graph.graph.aget_state(config)
         is_new_conversation = not existing.values.get("messages")
         messages: list[Any] = [HumanMessage(request.instruction)]
         if is_new_conversation:
@@ -180,13 +183,13 @@ class LangGraphAgent(Agent):
             self._metrics.record_run(status, (time.perf_counter() - started) * 1000)
 
     async def resume(self, conversation_id: str, approved: bool) -> AgentRunState:
-        entry = self._pending_calls.pop(conversation_id, None)
+        entry = await self._pending_store.take(conversation_id)
         if entry is None:
             raise ValueError(f"No pending approval for conversation '{conversation_id}'.")
         pending, requested_at = entry
 
         config = {"configurable": {"thread_id": conversation_id}}
-        snapshot = self._agent_graph.graph.get_state(config)
+        snapshot = await self._agent_graph.graph.aget_state(config)
         instruction = snapshot.values.get("instruction", "")
 
         if self._clock() - requested_at > self._approval_ttl_seconds:
@@ -259,7 +262,7 @@ class LangGraphAgent(Agent):
                     approval_status=ApprovalStatus.NOT_REQUIRED,
                 )
             )
-            self._agent_graph.graph.update_state(config, {"messages": [tool_message], "pending_approval": None})
+            await self._agent_graph.graph.aupdate_state(config, {"messages": [tool_message], "pending_approval": None})
             if not approved:
                 outcome = "was not executed, as you decided"
             elif status is ToolCallStatus.SUCCESS:
@@ -305,7 +308,7 @@ class LangGraphAgent(Agent):
                 )
             )
 
-        self._agent_graph.graph.update_state(
+        await self._agent_graph.graph.aupdate_state(
             config, {"messages": [tool_message, final_response], "pending_approval": None}
         )
 
@@ -409,7 +412,7 @@ class LangGraphAgent(Agent):
     async def _state_from_result(self, conversation_id: str, result: dict[str, Any]) -> AgentRunState:
         pending = result.get("pending_approval")
         if pending is not None:
-            self._pending_calls[conversation_id] = (pending, self._clock())
+            await self._pending_store.put(conversation_id, pending, self._clock())
             description = await self._build_approval_description(pending)
             await self._approval_service.request_approval(conversation_id, pending.tool_call_id, description)
             return AgentRunState(

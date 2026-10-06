@@ -46,6 +46,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 
+from mailpilot.agent.pending import PendingToolCall
 from mailpilot.audit.service import AuditService
 from mailpilot.config import Settings
 from mailpilot.logging_config import get_logger
@@ -61,14 +62,6 @@ logger = get_logger(__name__)
 
 # Audit `tool_name` used when a run ends early, keyed by `GraphState.terminated_kind`.
 TERMINATION_AUDIT_NAMES = {"limit": "__execution_limit__", "llm_error": "__llm_error__"}
-
-
-class PendingToolCall(BaseModel):
-    """A tool call the agent wants to make but that needs human sign-off."""
-
-    tool_call_id: str
-    tool_name: str
-    tool_args: dict[str, Any]
 
 
 @dataclass(frozen=True)

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import os
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+# Before anything reads the settings: the app's own services stay in memory
+# during tests, so the suite never touches the developer's ./data/state.
+# (Environment variables win over .env.) Tests of the SQLite backend build it
+# explicitly in a temporary directory.
+os.environ["STATE_BACKEND"] = "memory"
 
-from mailpilot.config import Settings, get_settings
-from mailpilot.main import create_app
+import pytest  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from mailpilot.config import Settings, get_settings  # noqa: E402
+from mailpilot.main import create_app  # noqa: E402
 
 RUN_INTEGRATION_TESTS = os.environ.get("MAILPILOT_RUN_INTEGRATION_TESTS") == "1"
 

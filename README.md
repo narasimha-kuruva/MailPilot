@@ -23,6 +23,7 @@ the Docker image has never been built (see [Known limitations](#known-limitation
 - [Safety](#safety)
 - [Reliability](#reliability)
 - [Audit trail](#audit-trail)
+- [Persistence](#persistence)
 - [Observability](#observability)
 - [Evaluation](#evaluation)
 - [Testing](#testing)
@@ -426,8 +427,36 @@ ran, calls held for approval, and duplicates the idempotency guard
 suppressed. Runs that stop early add `__execution_limit__` or
 `__llm_error__` records. Follow-up calls proposed after an approval add
 `__deferred_followup__`. Records are redacted before they are stored,
-written to the log, and served at `GET /agent/{id}/audit`. They live in
-memory.
+written to the log, and served at `GET /agent/{id}/audit`. They are kept
+in SQLite and survive restarts (see [Persistence](#persistence)).
+
+## Persistence
+
+With `STATE_BACKEND=sqlite` (the default), everything a restart must not
+lose is kept in two SQLite files under `STATE_DIR` (`./data/state`):
+
+- `checkpoints.sqlite`, LangGraph's checkpointer: every conversation's
+  messages and graph state. A conversation continues after a restart, and
+  so does a run that stopped at the approval gate.
+- `mailpilot.sqlite`, with four tables:
+  - the audit trail;
+  - approval requests and decisions;
+  - the action each stopped run waits on, with the time it was requested
+    (wall-clock time, so expiry still works after a restart);
+  - approved actions that already ran, so a draft sent before a restart
+    can't be sent again after it.
+
+Restarted live, the audit trail was intact, and the agent answered a
+follow-up from the conversation it had before the restart. `STATE_BACKEND=memory`
+keeps all of this in the process instead, which is what the test suite
+uses. Metrics stay in memory either way: they are a live view since
+startup.
+
+Run **one worker process.** The files would be shared safely, but the
+"this send is running right now" half of the duplicate-send guard lives in
+process memory, so two workers could race the same send. To scale out,
+move that reservation, and the rest, to a server database behind the same
+interfaces.
 
 ## Observability
 
@@ -496,7 +525,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 315 unit tests, no network
+pytest                                                       # 322 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -552,6 +581,7 @@ All settings come from environment variables or `.env` (see
 | `AGENT_LLM_TIMEOUT_SECONDS` | `60` | Per model-call attempt; raise for CPU-only models |
 | `GMAIL_MAX_RETRIES` / `GMAIL_RETRY_BASE_DELAY_SECONDS` | `3` / `1.0` | Gmail retries (never for sends) |
 | `GMAIL_MAX_CONCURRENT_FETCHES` | `5` | Parallel body fetches per search |
+| `STATE_BACKEND` / `STATE_DIR` | `sqlite` / `./data/state` | Where conversations, approvals, the audit trail and completed sends are kept (`memory`: lost on restart). See [Persistence](#persistence) |
 | `LLM_INPUT_USD_PER_MILLION_TOKENS` / `LLM_OUTPUT_USD_PER_MILLION_TOKENS` | `0` / `0` | Cost estimate in `/metrics`; 0 turns it off |
 | `MAILPILOT_RUN_INTEGRATION_TESTS` | — | `1` enables the integration tests |
 
@@ -631,11 +661,9 @@ evaluation:
 - **One shared API key, no user accounts.** Anyone with the key has full
   access. There are no per-user permissions and no key rotation beyond
   changing the setting and restarting.
-- **One process, in-memory state.** Pending approvals, conversation
-  history, the audit trail, metrics and the idempotency guard live in
-  memory: they vanish on restart, and aren't shared across workers. Run a
-  single worker. Each would need a persistent store (the interfaces allow
-  it) for anything more.
+- **One worker, one machine.** State persists in local SQLite files, but
+  part of the duplicate-send guard is per process. See
+  [Persistence](#persistence).
 - **Not a real MCP server.** The tools are internal; other MCP clients
   can't use them.
 - **After an approval,** the model gets one closing turn. Further tool

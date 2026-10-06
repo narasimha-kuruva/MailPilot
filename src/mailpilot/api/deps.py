@@ -8,15 +8,22 @@ Services are constructed lazily (via `lru_cache`, mirroring `get_settings`)
 so importing this module, or hitting unrelated routes like `/health`,
 never requires Gmail OAuth or a Gemini API key to be configured -- only
 actually calling an `/agent/*` route does.
+
+With `STATE_BACKEND=sqlite` (the default) the audit trail, approvals,
+pending approvals, completed sends and conversations live in SQLite under
+`STATE_DIR` and survive a restart (`mailpilot.persistence.sqlite`); with
+`memory` they live in this process only.
 """
 
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from langchain_core.language_models import BaseChatModel
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from mailpilot.agent.base import Agent
@@ -32,10 +39,18 @@ from mailpilot.intelligence.service import IntelligenceService
 from mailpilot.llm.providers import LLMProviderError, build_chat_model, build_embedding_function
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.observability.metrics import LLMUsageCallback, MetricsRegistry
+from mailpilot.persistence.sqlite import (
+    PersistentState,
+    SqliteApprovalService,
+    SqliteAuditService,
+    SqliteCompletedActions,
+    SqlitePendingCallStore,
+)
 from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.rag.embeddings import EmbeddingFunction
 from mailpilot.rag.service import RAGService
 from mailpilot.safety.approval import ApprovalService
+from mailpilot.safety.idempotency import IdempotencyGuard
 from mailpilot.safety.in_memory_approval import InMemoryApprovalService
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -63,13 +78,24 @@ def get_metrics() -> MetricsRegistry:
 
 
 @lru_cache
+def get_persistent_state() -> PersistentState | None:
+    """The SQLite state under STATE_DIR, or None with STATE_BACKEND=memory."""
+    settings = get_settings()
+    return PersistentState.open(settings.state_dir) if settings.state_backend == "sqlite" else None
+
+
+@lru_cache
 def get_audit_service() -> AuditService:
+    state = get_persistent_state()
+    if state is not None:
+        return SqliteAuditService(state.database, metrics=get_metrics())
     return InMemoryAuditService(metrics=get_metrics())
 
 
 @lru_cache
 def get_approval_service() -> ApprovalService:
-    return InMemoryApprovalService()
+    state = get_persistent_state()
+    return SqliteApprovalService(state.database) if state is not None else InMemoryApprovalService()
 
 
 @lru_cache
@@ -105,8 +131,9 @@ def get_intelligence_service() -> IntelligenceService:
     return GeminiIntelligenceService(get_chat_model())
 
 
-@lru_cache
-def get_agent() -> Agent:
+def _build_agent(checkpointer: BaseCheckpointSaver) -> Agent:
+    """Everything the agent needs except the checkpointer. Blocking (Ollama
+    readiness check, Chroma on disk), so `get_agent` runs it in a worker thread."""
     settings = get_settings()
     chat_model = get_chat_model()
     tools = build_tools(
@@ -118,9 +145,9 @@ def get_agent() -> Agent:
         top_k=settings.rag_top_k,
         own_email=settings.gmail_user_email,
     )
-    limits = AgentLimits.from_settings(settings)
+    state = get_persistent_state()
     graph = build_agent_graph(
-        chat_model, tools, get_audit_service(), checkpointer=MemorySaver(), limits=limits
+        chat_model, tools, get_audit_service(), checkpointer=checkpointer, limits=AgentLimits.from_settings(settings)
     )
     return LangGraphAgent(
         agent_graph=graph,
@@ -131,7 +158,36 @@ def get_agent() -> Agent:
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
         gmail_client=get_gmail_client(),
         metrics=get_metrics(),
+        pending_store=SqlitePendingCallStore(state.database) if state is not None else None,
+        idempotency_guard=IdempotencyGuard(SqliteCompletedActions(state.database)) if state is not None else None,
     )
+
+
+_agent: Agent | None = None
+
+
+async def get_agent() -> Agent:
+    """The process's one agent, built on first use.
+
+    Async so it runs on the event loop: the SQLite checkpointer must be
+    created there. The rest of the (blocking) setup runs in a worker thread.
+    Two first requests racing may both build one; both get the first that
+    finished, so there is still only one agent and one pending-approval store.
+    """
+    global _agent
+    if _agent is None:
+        state = get_persistent_state()
+        checkpointer = state.checkpointer() if state is not None else MemorySaver()
+        built = await asyncio.to_thread(_build_agent, checkpointer)
+        if _agent is None:
+            _agent = built
+    return _agent
+
+
+def reset_agent() -> None:
+    """Forget the built agent (at shutdown, so a restarted app builds a fresh one)."""
+    global _agent
+    _agent = None
 
 
 GmailClientDep = Annotated[GmailClient, Depends(get_gmail_client)]
