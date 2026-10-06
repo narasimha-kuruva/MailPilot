@@ -521,13 +521,22 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     route (tools_node catches it). Tests: `tests/test_api_hardening.py` (9).
     Note: the user's own (gitignored) `.env` still says API_HOST=0.0.0.0.
 
-17. **Phase 5.11 Docker.** Add `Dockerfile` (multi-stage: builder installs
-    deps with `pip install .`, final stage copies venv/site-packages, runs
-    as a non-root user, `CMD ["uvicorn", "mailpilot.main:app", "--host",
-    "0.0.0.0", "--port", "8000"]`, no secrets baked in — `.env` mounted or
-    env vars passed at `docker run` time). Add `.dockerignore` (`.venv/`,
-    `.git/`, `data/`, `secrets/`, `.env`, `__pycache__/`, `.pytest_cache/`,
-    this file itself, test files if you want a slimmer image).
+17. ✅ **DONE (2026-10-06), image NOT built** -- Phase 5.11 Docker.
+    `Dockerfile`: builder stage `pip install .` into `/opt/venv`; runtime
+    stage copies the venv only, runs as uid 10001 `mailpilot`, WORKDIR
+    `/app` with `secrets/` and `data/` dirs (mount real ones over them),
+    HEALTHCHECK on `/api/v1/health`, CMD uvicorn on 0.0.0.0:8000. No
+    secrets baked in (`--env-file` at run time). `.dockerignore` excludes
+    `.env`, `secrets/`, `data/`, `.git/`, `.venv/`, caches, `tests/`, this
+    file. **Docker is not installed in this environment, so the image was
+    never built or run.** Verified instead: a non-editable `pip install .`
+    into a fresh venv (the builder's exact step) contains all 14
+    subpackages, and uvicorn from that install, run outside the repo with
+    no `.env`, served /health, /docs, /openapi.json, /metrics (200),
+    /agent/run with empty instruction (422), unknown /decision (404), all
+    with X-Request-ID and JSON logs. The OAuth consent flow can't run in a
+    container: create `secrets/token.json` on the host first. Ollama from
+    a container: `OLLAMA_BASE_URL=http://host.docker.internal:11434`.
 
 18. **Phase 5.12 Full README rewrite.** Do this LAST, after everything above
     is implemented and verified, so it documents what's actually true. Must
