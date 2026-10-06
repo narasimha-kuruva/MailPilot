@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 
 from mailpilot.evaluation.runner import run_scenario
 from mailpilot.evaluation.scenarios import SCENARIOS, Category, Scenario
-from tests.fakes import FakeChatModel
+from tests.fakes import FakeChatModel, FakeEmbeddingFunction
 
 
 async def _no_sleep(_seconds: float) -> None:
@@ -23,7 +23,7 @@ async def test_scenario_passes_with_its_scripted_model(scenario: Scenario) -> No
     script = scenario.script()
     chat_model = FakeChatModel(script)
 
-    result = await run_scenario(scenario, chat_model, sleep=_no_sleep)
+    result = await run_scenario(scenario, chat_model, embedding_function=FakeEmbeddingFunction(), sleep=_no_sleep)
 
     assert result.passed, "\n".join(result.failures)
     # Every scripted response was used: the script describes the run exactly.

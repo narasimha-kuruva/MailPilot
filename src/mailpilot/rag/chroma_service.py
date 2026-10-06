@@ -26,11 +26,20 @@ from mailpilot.rag.chunking import chunk_text
 from mailpilot.rag.embeddings import EmbeddingFunction
 from mailpilot.rag.service import RAGService
 from mailpilot.schemas.email import EmailThread
-from mailpilot.schemas.rag import RetrievedChunk
+from mailpilot.schemas.rag import ContextStats, RetrievedChunk
 
 _COLLECTION_NAME = "mailpilot_context"
 
 _Metadata = dict[str, str | int | float | bool]
+
+
+def _thread_source(thread_id: str) -> dict[str, Any]:
+    """Metadata filter for one indexed thread's chunks."""
+    return {"$and": [{"source_type": "email_thread"}, {"thread_id": thread_id}]}
+
+
+def _document_source(document_id: str) -> dict[str, Any]:
+    return {"$and": [{"source_type": "document"}, {"document_id": document_id}]}
 
 
 def _sanitize_metadata(metadata: dict[str, Any]) -> _Metadata:
@@ -61,14 +70,27 @@ class ChromaRAGService(RAGService):
             _COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
         )
 
-    async def _embed_and_upsert(self, ids: list[str], documents: list[str], metadatas: list[_Metadata]) -> None:
-        """The shared tail of every ingest: one embedding batch, one upsert, off the event loop."""
-        embeddings = await self._embedding_function.embed_documents(documents)
-        await asyncio.to_thread(
-            self._collection.upsert, ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings
-        )
+    async def _embed_and_replace(
+        self, source: dict[str, Any], ids: list[str], documents: list[str], metadatas: list[_Metadata]
+    ) -> int:
+        """The shared tail of every ingest: one embedding batch, then the source's old chunks
+        are swapped for the new ones, off the event loop.
 
-    async def ingest_thread(self, thread: EmailThread) -> None:
+        Embedding happens first, so a failed embedding call leaves the previous
+        version in place. Replacing (rather than upserting over) the old chunks
+        means a source that shrank leaves no stale chunks behind.
+        """
+        embeddings = await self._embedding_function.embed_documents(documents) if documents else []
+
+        def _replace() -> None:
+            self._collection.delete(where=source)
+            if ids:
+                self._collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+
+        await asyncio.to_thread(_replace)
+        return len(ids)
+
+    async def ingest_thread(self, thread: EmailThread) -> int:
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[_Metadata] = []
@@ -91,19 +113,41 @@ class ChromaRAGService(RAGService):
                 ids.append(f"thread:{message.message_id}:{index}")
                 documents.append(chunk)
                 metadatas.append(metadata)
-        if ids:
-            await self._embed_and_upsert(ids, documents, metadatas)
+        return await self._embed_and_replace(_thread_source(thread.thread_id), ids, documents, metadatas)
 
-    async def ingest_document(self, document_id: str, text: str, metadata: dict) -> None:
+    async def ingest_document(self, document_id: str, text: str, metadata: dict) -> int:
         chunks = chunk_text(text, self._chunk_size, self._chunk_overlap)
-        if not chunks:
-            return
         merged_metadata = _sanitize_metadata({**metadata, "source_type": "document", "document_id": document_id})
-        await self._embed_and_upsert(
+        return await self._embed_and_replace(
+            _document_source(document_id),
             [f"document:{document_id}:{index}" for index in range(len(chunks))],
             chunks,
             [merged_metadata] * len(chunks),
         )
+
+    async def _delete(self, source: dict[str, Any]) -> int:
+        def _run() -> int:
+            count = len(self._collection.get(where=source, include=[])["ids"])
+            if count:
+                self._collection.delete(where=source)
+            return count
+
+        return await asyncio.to_thread(_run)
+
+    async def delete_thread(self, thread_id: str) -> int:
+        return await self._delete(_thread_source(thread_id))
+
+    async def delete_document(self, document_id: str) -> int:
+        return await self._delete(_document_source(document_id))
+
+    async def stats(self) -> ContextStats:
+        def _run() -> ContextStats:
+            metadatas = self._collection.get(include=["metadatas"])["metadatas"] or []
+            threads = {m.get("thread_id") for m in metadatas if m.get("source_type") == "email_thread"}
+            documents = {m.get("document_id") for m in metadatas if m.get("source_type") == "document"}
+            return ContextStats(chunks=len(metadatas), threads=len(threads), documents=len(documents))
+
+        return await asyncio.to_thread(_run)
 
     async def query(
         self, query: str, top_k: int = 5, where: dict[str, Any] | None = None

@@ -33,6 +33,11 @@ def _render_thread(thread: EmailThread) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def exclude_thread(thread_id: str) -> dict[str, Any]:
+    """Metadata filter: everything except one thread's chunks (documents included)."""
+    return {"$or": [{"source_type": {"$ne": "email_thread"}}, {"thread_id": {"$ne": thread_id}}]}
+
+
 def _pack_context(chunks: list[RetrievedChunk], max_chars: int) -> list[RetrievedChunk]:
     """Greedily keep the highest-scored chunks that fit in the character budget.
 
@@ -65,7 +70,10 @@ async def draft_grounded_reply(
     latest = thread.messages[-1] if thread.messages else None
     query_text = f"{thread.subject}\n{intent}\n{latest.body_text or latest.snippet if latest else ''}"
 
-    retrieved = await rag_service.query(query_text, top_k=top_k)
+    # Context from *other* threads and documents: the thread being replied to
+    # is already in the prompt in full, and its own chunks -- the most similar
+    # ones in the store, if it was indexed -- would crowd everything else out.
+    retrieved = await rag_service.query(query_text, top_k=top_k, where=exclude_thread(thread.thread_id))
     context_chunks = _pack_context(retrieved, max_context_chars)
 
     context_block = "\n\n".join(

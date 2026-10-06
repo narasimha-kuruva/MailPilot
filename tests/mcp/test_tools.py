@@ -154,6 +154,7 @@ def test_registry_builds_all_seven_tools_keyed_by_name() -> None:
         ("summarize_thread", {"thread_id": ""}),
         ("extract_tasks", {"thread_id": ""}),
         ("draft_grounded_reply", {"thread_id": "t", "intent": ""}),
+        ("index_thread", {"thread_id": ""}),
     ],
 )
 def test_every_tool_rejects_empty_identifiers(tool_name: str, args: dict, tmp_path: Path) -> None:

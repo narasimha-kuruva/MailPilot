@@ -39,9 +39,11 @@ class DraftGroundedReplyArgs(BaseModel):
 class DraftGroundedReplyTool(MCPTool):
     name = "draft_grounded_reply"
     description = (
-        "Read a thread, retrieve relevant historical context, and draft a grounded reply "
-        "(never inventing recipients, facts, dates, or prices). Creates a Gmail draft; "
-        "never sends it."
+        "Draft a reply to a thread, grounded in MailPilot's knowledge store: the indexed "
+        "threads and documents (pricing notes, policies, past conversations) that you can't "
+        "see otherwise. Use it whenever a reply needs facts beyond the thread itself -- e.g. "
+        "'using our pricing notes' -- instead of asking the user for them. Never invents "
+        "recipients, facts, dates, or prices. Creates a Gmail draft; never sends it."
     )
     args_schema = DraftGroundedReplyArgs
 

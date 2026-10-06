@@ -23,7 +23,7 @@ from mailpilot.agent.graph import AgentLimits
 from mailpilot.config import get_settings
 from mailpilot.evaluation.runner import ScenarioResult, run_scenario
 from mailpilot.evaluation.scenarios import SCENARIOS, Category
-from mailpilot.llm.providers import LLMProviderError, build_chat_model
+from mailpilot.llm.providers import LLMProviderError, build_chat_model, build_embedding_function
 from mailpilot.logging_config import configure_logging
 
 
@@ -52,6 +52,8 @@ async def _main(argv: list[str] | None = None) -> int:
     configure_logging("ERROR")
     try:
         chat_model = build_chat_model(settings)
+        # The knowledge-store scenarios use the provider's real embedding model.
+        embedding_function = build_embedding_function(settings)
     except LLMProviderError as exc:
         print(f"Cannot evaluate: {exc}", file=sys.stderr)
         return 2
@@ -72,7 +74,7 @@ async def _main(argv: list[str] | None = None) -> int:
     limits = AgentLimits.from_settings(settings)
     results = []
     for scenario in selected:
-        result = await run_scenario(scenario, chat_model, limits=limits)
+        result = await run_scenario(scenario, chat_model, embedding_function=embedding_function, limits=limits)
         _print_result(result, args.verbose)
         results.append(result)
 

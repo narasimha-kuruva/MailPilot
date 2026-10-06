@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from mailpilot.api.middleware import request_context
 from mailpilot.api.routes.agent import router as agent_router
+from mailpilot.api.routes.context import router as context_router
 from mailpilot.api.routes.health import router as health_router
 from mailpilot.api.routes.metrics import router as metrics_router
 from mailpilot.config import get_settings
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(agent_router, prefix="/api/v1")
     app.include_router(metrics_router, prefix="/api/v1")
+    app.include_router(context_router, prefix="/api/v1")
 
     return app
 

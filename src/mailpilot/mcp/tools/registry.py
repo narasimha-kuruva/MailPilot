@@ -20,6 +20,7 @@ from mailpilot.mcp.tools.classify_email import ClassifyEmailTool
 from mailpilot.mcp.tools.create_draft import CreateDraftTool
 from mailpilot.mcp.tools.draft_grounded_reply import DraftGroundedReplyTool
 from mailpilot.mcp.tools.extract_tasks import ExtractTasksTool
+from mailpilot.mcp.tools.index_thread import IndexThreadTool
 from mailpilot.mcp.tools.list_labels import ListLabelsTool
 from mailpilot.mcp.tools.read_email import ReadEmailTool
 from mailpilot.mcp.tools.read_thread import ReadThreadTool
@@ -54,6 +55,8 @@ def build_tools(
         tools.append(SummarizeThreadTool(gmail_client, intelligence_service))
         tools.append(ExtractTasksTool(gmail_client, intelligence_service))
 
+    if rag_service is not None:
+        tools.append(IndexThreadTool(gmail_client, rag_service))
     if rag_service is not None and chat_model is not None:
         tools.append(
             DraftGroundedReplyTool(

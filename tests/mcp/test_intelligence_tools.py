@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from mailpilot.agent.reply_drafting import exclude_thread
 from mailpilot.intelligence.gemini_service import GeminiIntelligenceService
 from mailpilot.mcp.tools.classify_email import ClassifyEmailTool
 from mailpilot.mcp.tools.draft_grounded_reply import DraftGroundedReplyTool
@@ -12,6 +13,7 @@ from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.mcp.tools.summarize_thread import SummarizeThreadTool
 from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.rag.service import RAGService
+from mailpilot.schemas.rag import ContextStats
 from mailpilot.schemas.intelligence import (
     EmailCategory,
     EmailClassification,
@@ -90,20 +92,31 @@ async def test_draft_grounded_reply_tool_creates_a_draft(tmp_path: Path) -> None
 
 
 class _RecordingRAGService(RAGService):
-    """Records the retrieval size it was asked for; holds no context."""
+    """Records the retrieval it was asked for; holds no context."""
 
     def __init__(self) -> None:
         self.top_k: int | None = None
+        self.where: dict | None = None
 
-    async def ingest_thread(self, thread: EmailThread) -> None:
+    async def ingest_thread(self, thread: EmailThread) -> int:
         raise NotImplementedError
 
-    async def ingest_document(self, document_id: str, text: str, metadata: dict) -> None:
+    async def ingest_document(self, document_id: str, text: str, metadata: dict) -> int:
         raise NotImplementedError
 
     async def query(self, query: str, top_k: int = 5, where: dict | None = None) -> list:
         self.top_k = top_k
+        self.where = where
         return []
+
+    async def delete_thread(self, thread_id: str) -> int:
+        raise NotImplementedError
+
+    async def delete_document(self, document_id: str) -> int:
+        raise NotImplementedError
+
+    async def stats(self) -> ContextStats:
+        raise NotImplementedError
 
 
 @pytest.mark.asyncio
@@ -122,6 +135,8 @@ async def test_draft_grounded_reply_retrieves_the_configured_number_of_chunks() 
     await tools["draft_grounded_reply"].run(thread_id="thread-1", intent="thank them")
 
     assert rag_service.top_k == 2
+    # The thread being replied to is excluded: it's in the prompt already.
+    assert rag_service.where == exclude_thread("thread-1")
 
 
 @pytest.mark.asyncio
@@ -211,6 +226,7 @@ def test_registry_includes_intelligence_and_rag_tools_when_deps_provided(tmp_pat
         "summarize_thread",
         "extract_tasks",
         "draft_grounded_reply",
+        "index_thread",
     }
 
 

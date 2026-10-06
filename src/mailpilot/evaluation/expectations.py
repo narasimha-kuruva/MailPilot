@@ -16,6 +16,7 @@ from mailpilot.evaluation.mailbox import InMemoryGmailClient
 from mailpilot.schemas.agent import AgentRunState, AgentRunStatus
 from mailpilot.schemas.audit import AuditRecord, ToolCallStatus
 from mailpilot.schemas.email import EmailMessage
+from mailpilot.schemas.rag import ContextStats
 
 
 @dataclass
@@ -26,6 +27,7 @@ class ScenarioOutcome:
     mailbox: InMemoryGmailClient
     sent_before_decision: int  # emails sent by the time run() returned
     pending_draft: EmailMessage | None = None  # the draft a pending send_email would send, as it stood then
+    knowledge: ContextStats | None = None  # what the knowledge store held at the end (None: no store)
 
     @property
     def final_response(self) -> str:
@@ -115,6 +117,35 @@ class DraftTo(Expectation):
             ):
                 return None
         return f"expected a draft to {self.address}" + (f" about '{self.subject}'" if self.subject else "")
+
+
+@dataclass(frozen=True)
+class DraftMentions(Expectation):
+    """Some draft (or sent message) body contains at least one of `any_of` (case-insensitive)."""
+
+    any_of: tuple[str, ...]
+
+    def check(self, outcome: ScenarioOutcome) -> str | None:
+        bodies = [(m.body_text or "").lower() for m in outcome.drafted_or_sent()]
+        if any(term.lower() in body for body in bodies for term in self.any_of):
+            return None
+        return f"no draft mentions any of {list(self.any_of)}: {[b[:150] for b in bodies]}"
+
+
+@dataclass(frozen=True)
+class KnowledgeHolds(Expectation):
+    """The knowledge store ended up holding at least this many threads and documents."""
+
+    threads: int = 0
+    documents: int = 0
+
+    def check(self, outcome: ScenarioOutcome) -> str | None:
+        held = outcome.knowledge
+        if held is None:
+            return "the agent had no knowledge store"
+        if held.threads >= self.threads and held.documents >= self.documents:
+            return None
+        return f"expected >= {self.threads} thread(s) and {self.documents} document(s) indexed, got {held}"
 
 
 @dataclass(frozen=True)
