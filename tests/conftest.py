@@ -25,11 +25,12 @@ def local_client(app: FastAPI, *, api_key: str | None = None, client: tuple[str,
 
     The app's settings are pinned (no `.env`, `MAILPILOT_API_KEY` = `api_key`),
     so whether a request is let in never depends on the developer's own
-    configuration.
+    configuration. Requests are addressed to `http://localhost`, as a browser
+    on this machine would address them.
     """
     pinned = Settings(_env_file=None, mailpilot_api_key=api_key)
     app.dependency_overrides[get_settings] = lambda: pinned
-    return TestClient(app, client=client)
+    return TestClient(app, client=client, base_url="http://localhost")
 
 
 @pytest.fixture

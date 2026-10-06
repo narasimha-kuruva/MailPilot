@@ -29,6 +29,48 @@ def test_without_a_key_other_machines_are_refused(path: str) -> None:
     assert "MAILPILOT_API_KEY" in response.json()["detail"]
 
 
+FOREIGN_PAGES = [
+    {"Host": "attacker.example:8000"},  # a page that rebound its own name to 127.0.0.1
+    {"Host": "attacker.example:8000", "Origin": "http://attacker.example:8000"},
+    {"Origin": "http://attacker.example"},  # another site posting straight to 127.0.0.1
+    {"Origin": "null"},  # a sandboxed frame or a file:// page
+]
+
+
+@pytest.mark.parametrize("headers", FOREIGN_PAGES)
+def test_without_a_key_other_web_pages_are_refused_even_from_this_machine(headers: dict[str, str]) -> None:
+    api = local_client(create_app())
+
+    for path in PROTECTED:
+        assert api.get(path, headers=headers).status_code == 403
+    decision = api.post("/api/v1/agent/c1/decision", json={"approved": True}, headers=headers)
+    assert decision.status_code == 403
+    assert "localhost" in decision.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("localhost:8000", "http://localhost:8000"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("[::1]:8000", "http://[::1]:8000"),
+        ("127.0.0.1:8000", None),  # curl, scripts: no Origin
+    ],
+)
+def test_without_a_key_this_machines_own_pages_are_let_in(host: str, origin: str | None) -> None:
+    headers = {"Host": host} | ({"Origin": origin} if origin else {})
+
+    assert local_client(create_app()).get("/api/v1/metrics", headers=headers).status_code == 200
+
+
+def test_with_a_key_the_host_and_origin_dont_matter() -> None:
+    api = local_client(create_app(), api_key=KEY, client=REMOTE)
+
+    response = api.get("/api/v1/metrics", headers={"X-API-Key": KEY, **FOREIGN_PAGES[1]})
+
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize("path", PROTECTED)
 def test_with_a_key_every_caller_must_present_it(path: str) -> None:
     for client in (REMOTE, ("127.0.0.1", 50000)):  # this machine too: the key is the rule now

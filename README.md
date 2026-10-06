@@ -163,7 +163,10 @@ access is closed by default:
 
 - **No `MAILPILOT_API_KEY` set:** only requests from this machine
   (loopback) are accepted. Others get `403`. This holds even if the server
-  is bound to `0.0.0.0`.
+  is bound to `0.0.0.0`. The request must also be addressed to
+  `localhost`, `127.0.0.1` or `[::1]`, and a browser request must come
+  from one of MailPilot's own pages. Otherwise any website you have open
+  could call the API through your browser.
 - **`MAILPILOT_API_KEY` set** (at least 16 characters): every request must
   send it, as `X-API-Key: <key>` or `Authorization: Bearer <key>`. Others
   get `401`. Generate a key with
@@ -171,8 +174,7 @@ access is closed by default:
 - **Always open:** `/api/v1/health` and the docs. On `/docs`, use
   **Authorize** to enter the key.
 
-A reverse proxy on the same machine reaches MailPilot from loopback, so
-without a key, the proxy itself must authenticate its users.
+Behind a reverse proxy, set a key and have the proxy add the header.
 
 ## Architecture
 
