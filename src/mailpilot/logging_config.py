@@ -19,7 +19,7 @@ import logging
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TextIO
 
 from mailpilot.redaction import redact_text, redact_value
 
@@ -54,15 +54,19 @@ class StructuredFormatter(logging.Formatter):
         return json.dumps(redact_value(payload), default=lambda value: redact_text(str(value)))
 
 
-def configure_logging(log_level: str = "INFO") -> None:
-    """Configure the root logger once, at application startup."""
+def configure_logging(log_level: str = "INFO", stream: TextIO | None = None) -> None:
+    """Configure the root logger once, at application startup.
+
+    Logs go to stdout by default; the MCP server passes stderr, because over
+    stdio its stdout carries the protocol.
+    """
     root = logging.getLogger()
     root.setLevel(log_level.upper())
 
     # Avoid duplicate handlers if called more than once (e.g. in tests).
     root.handlers.clear()
 
-    handler = logging.StreamHandler(stream=sys.stdout)
+    handler = logging.StreamHandler(stream=stream or sys.stdout)
     handler.setFormatter(StructuredFormatter())
     root.addHandler(handler)
 

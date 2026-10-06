@@ -191,6 +191,7 @@ src/mailpilot/
 ├── mcp/                    # Tools the model can call
 │   ├── base.py             #   MCPTool interface
 │   ├── langchain_adapter.py#   MCPTool -> LangChain tool schema
+│   ├── server.py           #   The tools over MCP (python -m mailpilot.mcp)
 │   └── tools/              #   12 tools + registry
 ├── gmail/                  # Gmail API client, OAuth, MIME parsing
 ├── intelligence/           # Classification, summaries, task extraction
@@ -286,11 +287,48 @@ that can send email stays explicit, small, and unit-testable with fakes.
 | `index_thread` | Saves a thread to the knowledge store, for later grounded replies | none (local store only) |
 | `send_email` | Sends a draft. **Always stops for human approval first** | send |
 
-The tools implement MailPilot's own `MCPTool` interface (a name, a
-description, a Pydantic argument schema, and `run()`), adapted to
-LangChain only for describing them to the model. They are **not** served
-over the Model Context Protocol. The `mcp` dependency is unused, so other
-MCP clients can't call them.
+The tools implement MailPilot's own `MCPTool` interface: a name, a
+description, a Pydantic argument schema, and `run()`. They are adapted to
+LangChain for describing them to the model, and served over the Model
+Context Protocol for other clients (below).
+
+### Using the tools from other MCP clients
+
+`python -m mailpilot.mcp` serves the tools over MCP (stdio), so an MCP
+client such as Claude Desktop can search, read, label and draft through
+MailPilot. In Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mailpilot": {
+      "command": "D:\\MailPilot\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mailpilot.mcp", "--project-dir", "D:\\MailPilot"]
+    }
+  }
+}
+```
+
+- **`send_email` is not offered.** MailPilot only sends after a person
+  approves the exact email in its own app, and an MCP client would bypass
+  that gate. Over MCP, the client can draft, and you send from Gmail or
+  from MailPilot.
+- **The rules stay the same.** The guardrails live inside the tools (no
+  trashing, no outsiders in a thread reply). Every call is retried,
+  time-limited, and audited under the conversation id `mcp-<session>`.
+  Results are fenced as untrusted email content, because the client is a
+  language model too.
+- **Gmail must be authorized first** (see [Quick start](#quick-start)).
+  Over stdio, stdout carries the protocol, so the server refuses to start
+  rather than run the consent flow there. Logs go to stderr.
+- **Model-backed tools are optional.** Classify, summarize, extract and
+  grounded drafting are offered only when the configured LLM provider is
+  usable; the Gmail tools work regardless.
+
+Checked live: the SDK's own client launched the server as a subprocess
+over stdio and listed 11 tools. It called `list_labels` and
+`search_emails` against a real inbox, with results fenced, and its
+`send_email` call was refused.
 
 ## Gmail integration
 
@@ -537,7 +575,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 327 unit tests, no network
+pytest                                                       # 333 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -692,8 +730,9 @@ evaluation:
 - **One worker, one machine.** State persists in local SQLite files, but
   part of the duplicate-send guard is per process. See
   [Persistence](#persistence).
-- **Not a real MCP server.** The tools are internal; other MCP clients
-  can't use them.
+- **MCP over stdio only.** The MCP server serves one local client. The
+  SDK also supports HTTP transports, which would need the same access
+  rules as the API before being exposed.
 - **Limits are per instruction**, not per conversation. Each `/run` gets
   a fresh budget. This is deliberate: a runaway *instruction* is what
   needs bounding.

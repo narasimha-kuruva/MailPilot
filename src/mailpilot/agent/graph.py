@@ -172,7 +172,7 @@ def fence_tool_output(content: str, status: ToolCallStatus) -> str:
     return wrap_untrusted(TOOL_RESULT_LABEL, content)
 
 
-def _truncate(text: str, max_chars: int) -> str:
+def truncate_output(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"... [truncated to {max_chars} chars]"
@@ -237,7 +237,7 @@ def build_agent_graph(
         # user-facing text is extracted (not mutated) by
         # `langgraph_agent._message_text`.
         if isinstance(response.content, str):
-            response.content = _truncate(response.content, limits.max_output_chars)
+            response.content = truncate_output(response.content, limits.max_output_chars)
 
         return {"messages": [response], "step_count": step_count}
 
@@ -264,7 +264,7 @@ def build_agent_graph(
                         return await with_timeout(lambda: _tool.run(**_args), limits.tool_timeout_seconds)
 
                     result = await with_retries(_call, max_retries=limits.max_tool_retries, **sleep_kwargs)
-                    content = _truncate(serialize_result(result), limits.max_output_chars)
+                    content = truncate_output(serialize_result(result), limits.max_output_chars)
                 except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
                     status = ToolCallStatus.FAILURE
                     content = f"Error calling {call['name']}: {exc}"
