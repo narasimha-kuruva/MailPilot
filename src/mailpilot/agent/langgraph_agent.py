@@ -33,6 +33,7 @@ from mailpilot.mcp.base import MCPTool
 from mailpilot.prompts import AGENT_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT
 from mailpilot.resilience import describe_error, with_retries, with_timeout
 from mailpilot.safety.approval import ApprovalService
+from mailpilot.safety.idempotency import IdempotencyGuard, idempotency_key
 from mailpilot.schemas.agent import (
     AgentPlan,
     AgentRequest,
@@ -91,6 +92,7 @@ class LangGraphAgent(Agent):
         tool_timeout_seconds: float = 30.0,
         gmail_client: GmailClient | None = None,
         clock: Callable[[], float] = time.monotonic,
+        idempotency_guard: IdempotencyGuard | None = None,
     ) -> None:
         self._agent_graph = agent_graph
         self._tools = tools
@@ -106,6 +108,9 @@ class LangGraphAgent(Agent):
         # conversation_id -> (pending call, monotonic time it was requested).
         # In-memory and single-process, matching the other Phase 2 services.
         self._pending_calls: dict[str, tuple[PendingToolCall, float]] = {}
+        # Shared by every conversation: an approved action runs at most once
+        # (Phase 5.5, see mailpilot.safety.idempotency).
+        self._idempotency = idempotency_guard or IdempotencyGuard()
 
     async def _invoke_model(self, call: Callable[[], Any]) -> Any:
         """One model call under the graph's LLM timeout/retry policy (see `agent_node`)."""
@@ -188,17 +193,7 @@ class LangGraphAgent(Agent):
         await self._approval_service.record_decision(conversation_id, pending.tool_call_id, approved)
 
         if approved:
-            tool = self._tools[pending.tool_name]
-            try:
-                # Bounded by the same tool timeout as every other tool call,
-                # but never auto-retried -- see mailpilot.gmail.google_client
-                # for why a send is never blindly retried.
-                result = await with_timeout(lambda: tool.run(**pending.tool_args), self._tool_timeout_seconds)
-                content = serialize_result(result)
-                status = ToolCallStatus.SUCCESS
-            except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
-                content = f"Error calling {pending.tool_name}: {exc}"
-                status = ToolCallStatus.FAILURE
+            content, status = await self._execute_approved(pending)
             approval_status = ApprovalStatus.APPROVED
         else:
             content = "The user did not approve this action; it was not executed."
@@ -250,6 +245,8 @@ class LangGraphAgent(Agent):
                 outcome = "was not executed, as you decided"
             elif status is ToolCallStatus.SUCCESS:
                 outcome = "was executed successfully"
+            elif status is ToolCallStatus.SKIPPED:
+                outcome = "was not executed again"
             else:
                 outcome = "was attempted but failed"
             return AgentRunState(
@@ -298,6 +295,41 @@ class LangGraphAgent(Agent):
             status=AgentRunStatus.COMPLETED,
             final_response=final_text,
         )
+
+    async def _execute_approved(self, pending: PendingToolCall) -> tuple[str, ToolCallStatus]:
+        """Run an approved action once, unless that same action already ran or is running."""
+        key = idempotency_key(pending.tool_name, pending.tool_args)
+        if not self._idempotency.try_begin(key):
+            previous = self._idempotency.completed_result(key)
+            if previous is None:
+                reason = "the same action is already running from another approval"
+            else:
+                reason = f"this exact action already ran earlier ({previous[:200]})"
+            return (
+                f"Not executed: {reason}. MailPilot never runs an approved '{pending.tool_name}' twice.",
+                ToolCallStatus.SKIPPED,
+            )
+
+        tool = self._tools[pending.tool_name]
+        content = f"'{pending.tool_name}' was interrupted before it finished."
+        status = ToolCallStatus.FAILURE
+        try:
+            # Bounded by the same tool timeout as every other tool call,
+            # but never auto-retried -- see mailpilot.gmail.google_client
+            # for why a send is never blindly retried.
+            result = await with_timeout(lambda: tool.run(**pending.tool_args), self._tool_timeout_seconds)
+            content = serialize_result(result)
+            status = ToolCallStatus.SUCCESS
+        except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
+            content = f"Error calling {pending.tool_name}: {exc}"
+        finally:
+            # Also on cancellation, so an interrupted action can't stay
+            # "running" forever and block every later approval of it.
+            if status is ToolCallStatus.SUCCESS:
+                self._idempotency.complete(key, content)
+            else:
+                self._idempotency.abandon(key)
+        return content, status
 
     async def _build_approval_description(self, pending: PendingToolCall) -> str:
         """Best-effort, human-reviewable description of the pending action.

@@ -425,36 +425,21 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     can't be added to a thread reply. `FakeGmailClient.set_message()` added.
     Live-checked with Ollama/gemma4:e2b: reads fenced results fine.
 
-12. **Phase 5.5 Idempotency guard.** Add `safety/idempotency.py`:
-    ```python
-    class IdempotencyGuard:
-        def __init__(self) -> None:
-            self._completed: dict[str, str] = {}
-        def already_completed(self, key: str) -> str | None:
-            return self._completed.get(key)
-        def mark_completed(self, key: str, result_summary: str) -> None:
-            self._completed[key] = result_summary
-    ```
-    Wire into `LangGraphAgent` (optional constructor param, default to a
-    fresh `IdempotencyGuard()` if not passed — mirrors how other optional
-    services default). In `resume()`, before executing the approved tool,
-    compute a key from tool name + args (e.g.
-    `f"{pending.tool_name}:{json.dumps(pending.tool_args, sort_keys=True)}"`)
-    and check the guard; if already completed, skip the real call and reuse
-    the cached result (record an audit entry noting the duplicate was
-    suppressed). Mark completed on success.
-    Document clearly (module docstring + README) *why* this exists even
-    though `self._pending_calls.pop()` already prevents replaying the *same*
-    pending entry twice: it protects against the same real-world action
-    (same draft_id) being approved through two *different* pending entries
-    or conversations, and against any future retry layer added above
-    `resume()`.
-    Test: manually seed the guard with a `send_email:<draft_id>` key already
-    marked completed, call the code path that would send it again (or, more
-    simply, unit-test `IdempotencyGuard` directly, then a `LangGraphAgent`-
-    level test that pre-populates two separate pending entries pointing at
-    the same `draft_id`, approves both, and asserts `gmail_client.send_email`
-    was only actually invoked once).
+12. ✅ **DONE (2026-10-06)** -- Phase 5.5 idempotency guard.
+    `safety/idempotency.py`: `idempotency_key(tool, args)` (sorted-key JSON)
+    and `IdempotencyGuard` with `try_begin` / `complete` / `abandon` /
+    `completed_result`. Differs from the sketch below on purpose: it also
+    tracks IN-FLIGHT actions, so two approvals racing for the same draft
+    can't both send (the sketch only marked completion after the await).
+    `abandon()` on failure or cancellation (in a `finally`), so a failed
+    send can be approved again (Gmail deletes a sent draft, so a send that
+    did go out fails "not found" rather than sending twice).
+    `LangGraphAgent(idempotency_guard=...)`, default one per agent (shared
+    across conversations); `resume()` now calls `_execute_approved()`; a
+    suppressed duplicate is audited SKIPPED + APPROVED with the reason, and
+    the model is told it was not run again. Tests:
+    `tests/safety/test_idempotency.py` (7) incl. two conversations
+    approving the same draft (sequential and concurrent) -> one send.
 
 13. **Phase 5.7 Observability.** Add `mailpilot/observability/metrics.py`
     with a dependency-free `MetricsRegistry` (counters: agent runs total/
