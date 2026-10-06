@@ -438,7 +438,7 @@ so treat a live score as a sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 249 unit tests, no network
+pytest                                                       # 274 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
