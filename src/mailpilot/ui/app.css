@@ -181,6 +181,33 @@ code { background: var(--code); border-radius: 4px; padding: 0 0.25rem; font-siz
 .row { display: flex; align-items: center; gap: 0.4rem; }
 .row.end { justify-content: flex-end; }
 .index-form input[type="number"] { width: 4.5rem; }
+input[type="checkbox"] { padding: 0; margin: 0; accent-color: var(--accent); }
+
+.thread-picker { margin-top: 0.8rem; }
+.thread-picker[hidden] { display: none; }
+.picker-head { justify-content: space-between; font-size: 0.86rem; margin-bottom: 0.4rem; }
+.picker-head label { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.thread-list, .index-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.thread-list { max-height: 20rem; overflow-y: auto; }
+.thread-list label {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.4rem 0.55rem; font-size: 0.84rem; cursor: pointer;
+}
+.thread-list input { margin-top: 0.25rem; flex: none; }
+.thread-text { display: flex; flex-direction: column; min-width: 0; }
+.thread-subject { font-weight: 600; overflow-wrap: anywhere; }
+.thread-meta { color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+.badge.indexed { color: var(--good); border-color: var(--good); }
+
+.index-status { font-size: 0.84rem; margin: 0.6rem 0 0.4rem; }
+.index-status:empty { display: none; }
+.index-status.ok { color: var(--good); }
+.index-status.bad { color: var(--bad); }
+.index-results li { font-size: 0.82rem; border-left: 3px solid var(--border); padding-left: 0.5rem; overflow-wrap: anywhere; }
+.index-results li.ok { border-color: var(--good); }
+.index-results li.warn { border-color: var(--warn-border); }
+.index-results li.bad { border-color: var(--bad); color: var(--bad); }
 
 dialog {
   border: 1px solid var(--border);

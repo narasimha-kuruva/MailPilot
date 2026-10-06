@@ -1,7 +1,12 @@
-"""Knowledge-store endpoints: index threads and documents, remove them, see what's stored.
+"""Knowledge-store endpoints: find threads, index them and documents, remove them, see what's stored.
 
 Grounded replies (`draft_grounded_reply`) retrieve from this store. It holds
 only what was explicitly indexed here or by the agent's `index_thread` tool.
+
+Indexing here doesn't go through the approval gate that the agent's
+`index_thread` does: a request to these endpoints is the person's own
+explicit choice (the web app's knowledge panel, or their own API client), not
+something a model decided after reading mail.
 """
 
 from __future__ import annotations
@@ -9,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from mailpilot.api.deps import GmailClientDep, RAGServiceDep
-from mailpilot.rag.indexing import index_threads, thread_ids_for_query
+from mailpilot.rag.indexing import find_threads, index_threads, thread_ids_for_query
 from mailpilot.schemas.rag import (
     ContextStats,
     IndexDocumentRequest,
@@ -17,6 +22,8 @@ from mailpilot.schemas.rag import (
     IndexThreadsRequest,
     IndexThreadsResponse,
     RemovedContext,
+    ThreadSearchRequest,
+    ThreadSearchResponse,
 )
 
 router = APIRouter(prefix="/context", tags=["context"])
@@ -26,6 +33,17 @@ router = APIRouter(prefix="/context", tags=["context"])
 async def get_context_stats(rag_service: RAGServiceDep) -> ContextStats:
     """How many chunks, threads, and documents the store holds."""
     return await rag_service.stats()
+
+
+@router.post("/threads/search", response_model=ThreadSearchResponse)
+async def search_threads_route(
+    request: ThreadSearchRequest, gmail_client: GmailClientDep, rag_service: RAGServiceDep
+) -> ThreadSearchResponse:
+    """The threads behind a Gmail search, to choose which to index. Each says how many chunks
+    the store already holds for it (0 if none). Nothing is indexed."""
+    return ThreadSearchResponse(
+        threads=await find_threads(gmail_client, rag_service, request.query, request.max_threads)
+    )
 
 
 @router.post("/threads", response_model=IndexThreadsResponse)

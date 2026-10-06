@@ -80,7 +80,9 @@ gives you:
 - an approval card for every send, showing the real recipients and text,
   with **Approve** and **Reject** buttons;
 - an activity panel listing every tool call in the conversation;
-- a knowledge panel to index threads by Gmail search.
+- a knowledge panel: search Gmail, tick the threads to keep, and index
+  them. It reports each thread's chunk count, or why it failed (see
+  [Retrieval](#retrieval-rag)).
 
 The conversation survives a page reload within the tab. If the server has
 an API key, the app asks for it once per tab. The app is three static files
@@ -387,27 +389,44 @@ over stdio and listed 11 tools. It called `list_labels` and
    thread itself, never from the model.
 
 **The store holds only what you put in it.** Reading mail never stores
-it. Content gets in two ways:
+it. Content gets in three ways:
 
-- **The context API.**
+- **The web app's knowledge panel.** Search Gmail, tick the threads you
+  want, and press **Index selected**. Threads already in the store are
+  marked with their chunk count. For each thread the panel reports how
+  many chunks it stored (and how many from an earlier indexing it
+  replaced), or why it failed. Picking the threads is your explicit
+  choice, so this doesn't ask for approval.
+- **The context API**, which the panel uses:
+  - `POST /api/v1/context/threads/search` lists the threads behind a
+    Gmail search (`{"query": "from:alice newer_than:90d", "max_threads": 10}`)
+    with subject, sender, date and `indexed_chunks`. It stores nothing.
   - `POST /api/v1/context/threads` indexes threads, either by id
     (`{"thread_ids": [...]}`) or every thread behind a Gmail search
-    (`{"query": "from:alice newer_than:90d", "max_threads": 20}`).
+    (`{"query": "...", "max_threads": 20}`). Each indexed thread comes
+    back with `chunks` and `replaced_chunks`.
   - `POST /api/v1/context/documents` indexes a document such as a price
     list, a policy or notes: `{"document_id", "text", "metadata"}`.
   - `DELETE /api/v1/context/threads/{id}` and
     `DELETE /api/v1/context/documents/{id}` remove one.
   - `GET /api/v1/context` shows the counts.
-  - A thread that can't be indexed is listed under `failed`; the others
-    still go in.
+  - A thread that can't be fetched or embedded is listed under `failed`
+    with the reason; the others still go in. A failed embedding leaves
+    the thread's earlier version in place.
 - **The agent.** Ask it to "save this thread for future replies", and it
   calls `index_thread`. That stops for your approval, like a send (see
-  [Human approval](#human-approval)).
+  [Human approval](#human-approval)). MCP clients can't call it at all.
 
-Re-indexing a thread or document replaces its earlier version. When
-drafting, retrieval skips the thread being replied to: that thread is
-already in the prompt in full, and its own chunks would crowd out
-everything else.
+Re-indexing a thread or document replaces its earlier version, so a
+thread is never stored twice. When drafting, retrieval skips the thread
+being replied to: that thread is already in the prompt in full, and its
+own chunks would crowd out everything else. Retrieved chunks go into the
+prompt fenced as untrusted text, like the email itself.
+
+Verified live (2026-10-06): two real threads were indexed from the web
+app with `embeddinggemma` (one chunk each). After a server restart, a
+grounded reply to a third, unindexed thread with `gemma4:e2b` retrieved
+both and named the roles they described. No Gmail draft was created.
 
 ## Human approval
 
@@ -603,7 +622,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 362 unit tests, no network
+pytest                                                       # 381 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -612,7 +631,8 @@ The unit tests use `FakeGmailClient`, `FakeChatModel` and
 They cover the graph and approval flow, limits and retries, every tool,
 the guardrails, prompt injection, idempotency, redaction, metrics, the API
 hardening, the Gmail client against a stub service, the providers against
-a stub Ollama, ChromaDB on disk, and all 16 evaluation scenarios.
+a stub Ollama, ChromaDB on disk (indexing, retrieval after a restart,
+re-indexing and failed embeddings), and all 16 evaluation scenarios.
 
 **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and on
 every pull request. It runs the unit tests on Python 3.11 and 3.12, and

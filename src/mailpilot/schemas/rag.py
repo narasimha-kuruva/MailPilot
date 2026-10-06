@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, model_validator
+
+from mailpilot.schemas.email import EmailAddress
 
 
 class RetrievedChunk(BaseModel):
@@ -37,11 +41,36 @@ class IndexThreadsRequest(BaseModel):
         return self
 
 
+class ThreadSearchRequest(BaseModel):
+    """A Gmail search whose threads to list for choosing what to index. Nothing is stored."""
+
+    query: str = Field(..., min_length=1, description="Gmail search, e.g. 'from:alice newer_than:90d'.")
+    max_threads: int = Field(default=10, ge=1, le=50, description="List at most this many threads.")
+
+
+class ThreadCandidate(BaseModel):
+    """A thread found by a search, described by its newest matching message."""
+
+    thread_id: str
+    subject: str
+    sender: EmailAddress
+    received_at: datetime | None = None
+    snippet: str = ""
+    indexed_chunks: int = Field(0, description="Chunks the store already holds for this thread; 0 if it isn't indexed.")
+
+
+class ThreadSearchResponse(BaseModel):
+    threads: list[ThreadCandidate] = Field(default_factory=list)
+
+
 class IndexedThread(BaseModel):
     thread_id: str
     subject: str
     messages: int
     chunks: int
+    replaced_chunks: int = Field(
+        0, description="Chunks from an earlier indexing of this thread, now replaced; 0 if it wasn't indexed before."
+    )
 
 
 class IndexFailure(BaseModel):

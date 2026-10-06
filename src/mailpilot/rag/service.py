@@ -46,5 +46,10 @@ class RAGService(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def indexed_threads(self, thread_ids: list[str]) -> dict[str, int]:
+        """How many chunks the store holds for each of `thread_ids`. Threads that aren't indexed are left out."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def stats(self) -> ContextStats:
         raise NotImplementedError

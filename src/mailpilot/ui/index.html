@@ -47,19 +47,27 @@
       </details>
       <details id="knowledge-panel">
         <summary>Knowledge</summary>
-        <p class="panel-hint">What grounded replies can draw on. Only what you index is stored.</p>
+        <p class="panel-hint">What grounded replies can draw on. Only the threads you pick and index are stored.</p>
         <p id="knowledge-stats" class="stats">…</p>
-        <form id="index-form" class="index-form">
-          <label for="index-query">Index threads matching a Gmail search</label>
+        <form id="thread-search-form" class="index-form">
+          <label for="index-query">Find threads with a Gmail search</label>
           <input id="index-query" type="text" placeholder="from:alice newer_than:90d" required>
           <div class="row">
             <label for="index-max">Up to</label>
             <input id="index-max" type="number" min="1" max="50" value="10">
             <span>threads</span>
-            <button type="submit" class="secondary">Index</button>
+            <button id="thread-search" type="submit" class="secondary">Search</button>
           </div>
         </form>
-        <p id="index-result" class="panel-hint"></p>
+        <p id="index-status" class="index-status" role="status"></p>
+        <ul id="index-results" class="index-results"></ul>
+        <div id="thread-picker" class="thread-picker" hidden>
+          <div class="row picker-head">
+            <label><input id="select-all" type="checkbox"> Select all</label>
+            <button id="index-selected" type="button" disabled>Index selected</button>
+          </div>
+          <ul id="thread-list" class="thread-list"></ul>
+        </div>
       </details>
     </aside>
   </main>

@@ -42,6 +42,18 @@ from mailpilot.schemas.audit import AuditRecord, ToolCallStatus
 # Never offered over MCP: these only run behind MailPilot's own human-approval gate.
 NOT_EXPOSED = SENSITIVE_TOOL_NAMES
 
+# What a client that calls one anyway is told.
+_REFUSALS = {
+    "send_email": (
+        "Sending email isn't available over MCP: MailPilot only sends after a person approves "
+        "the exact email in its own app. Create a draft instead."
+    ),
+    "index_thread": (
+        "Saving to the knowledge store isn't available over MCP: MailPilot only stores a thread "
+        "that a person chose, in its own app. Ask the user to index it there."
+    ),
+}
+
 INSTRUCTIONS = (
     "MailPilot gives access to the user's Gmail: search and read mail, list and apply labels, "
     "create drafts, classify and summarize email, and draft replies grounded in MailPilot's "
@@ -76,11 +88,8 @@ def build_server(
         name, arguments = params.name, dict(params.arguments or {})
         tool = exposed.get(name)
         if tool is None:
-            reason = (
-                "Sending email isn't available over MCP: MailPilot only sends after a person approves "
-                "the exact email in its own app. Create a draft instead."
-                if name in NOT_EXPOSED
-                else f"Unknown tool '{name}'."
+            reason = _REFUSALS.get(name) or (
+                f"'{name}' isn't available over MCP." if name in NOT_EXPOSED else f"Unknown tool '{name}'."
             )
             return types.CallToolResult(content=[types.TextContent(type="text", text=reason)], isError=True)
 

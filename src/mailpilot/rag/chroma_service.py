@@ -18,6 +18,7 @@ message for every ingested thread.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from typing import Any
 
 import chromadb
@@ -139,6 +140,17 @@ class ChromaRAGService(RAGService):
 
     async def delete_document(self, document_id: str) -> int:
         return await self._delete(_document_source(document_id))
+
+    async def indexed_threads(self, thread_ids: list[str]) -> dict[str, int]:
+        if not thread_ids:
+            return {}
+
+        def _run() -> dict[str, int]:
+            where = {"$and": [{"source_type": "email_thread"}, {"thread_id": {"$in": list(thread_ids)}}]}
+            metadatas = self._collection.get(where=where, include=["metadatas"])["metadatas"] or []
+            return dict(Counter(str(m["thread_id"]) for m in metadatas))
+
+        return await asyncio.to_thread(_run)
 
     async def stats(self) -> ContextStats:
         def _run() -> ContextStats:

@@ -115,6 +115,9 @@ class _RecordingRAGService(RAGService):
     async def delete_document(self, document_id: str) -> int:
         raise NotImplementedError
 
+    async def indexed_threads(self, thread_ids: list[str]) -> dict[str, int]:
+        raise NotImplementedError
+
     async def stats(self) -> ContextStats:
         raise NotImplementedError
 

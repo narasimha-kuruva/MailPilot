@@ -374,21 +374,152 @@ async function refreshKnowledge() {
   }
 }
 
-async function indexThreads(event) {
+// --- Knowledge: find threads, pick some, index them -----------------------------------
+//
+// Indexing from here is the person's own explicit choice, so it goes straight
+// to the context API; only the agent's `index_thread` stops for approval.
+
+let candidates = []; // the last search's threads (ThreadCandidate)
+let knowledgeBusy = false;
+
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function setIndexStatus(text, tone) {
+  const status = $("index-status");
+  status.textContent = text;
+  status.className = `index-status${tone ? ` ${tone}` : ""}`;
+}
+
+function describeFailure(error) {
+  return error instanceof ApiError ? `${error.status}: ${error.message}` : `Couldn't reach MailPilot: ${error.message}`;
+}
+
+function selectedThreadIds() {
+  return [...document.querySelectorAll("#thread-list input:checked")].map((box) => box.value);
+}
+
+function updateSelection() {
+  const boxes = [...document.querySelectorAll("#thread-list input")];
+  const selected = boxes.filter((box) => box.checked).length;
+  const button = $("index-selected");
+  button.textContent = selected ? `Index ${selected} selected` : "Index selected";
+  button.disabled = knowledgeBusy || selected === 0;
+  $("select-all").checked = boxes.length > 0 && selected === boxes.length;
+  $("select-all").indeterminate = selected > 0 && selected < boxes.length;
+}
+
+function setKnowledgeBusy(busy) {
+  knowledgeBusy = busy;
+  $("thread-search").disabled = busy;
+  $("select-all").disabled = busy;
+  document.querySelectorAll("#thread-list input").forEach((box) => (box.disabled = busy));
+  updateSelection();
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function renderCandidates() {
+  $("thread-picker").hidden = candidates.length === 0;
+  $("thread-list").replaceChildren(
+    ...candidates.map((thread) => {
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = thread.thread_id;
+      box.addEventListener("change", updateSelection);
+      const meta = el("span", "thread-meta", [thread.sender.name || thread.sender.email, formatDate(thread.received_at)].filter(Boolean).join(" · "));
+      if (thread.indexed_chunks) meta.append(el("span", "badge indexed", `indexed · ${plural(thread.indexed_chunks, "chunk")}`));
+      const text = el("span", "thread-text");
+      text.append(el("span", "thread-subject", thread.subject || "(no subject)"), meta);
+      const label = el("label");
+      label.title = thread.snippet || "";
+      label.append(box, text);
+      const item = el("li");
+      item.append(label);
+      return item;
+    })
+  );
+  updateSelection();
+}
+
+async function searchThreads(event) {
   event.preventDefault();
   const query = $("index-query").value.trim();
   const maxThreads = Number($("index-max").value) || 10;
-  if (!query) return;
-  const result = $("index-result");
-  result.textContent = "Indexing…";
+  if (!query || knowledgeBusy) return;
+  setKnowledgeBusy(true);
+  setIndexStatus("Searching Gmail…");
+  $("index-results").replaceChildren();
   try {
-    const response = await api("/context/threads", { method: "POST", body: { query, max_threads: maxThreads } });
-    const failed = response.failed.length ? `, ${response.failed.length} failed` : "";
-    result.textContent = `Indexed ${response.indexed.length} thread(s)${failed}.`;
+    const response = await api("/context/threads/search", { method: "POST", body: { query, max_threads: maxThreads } });
+    candidates = response.threads;
+    renderCandidates();
+    setIndexStatus(
+      candidates.length
+        ? `${plural(candidates.length, "thread")} found. Pick the ones to index; nothing is stored until you do.`
+        : "No threads match that search."
+    );
   } catch (error) {
-    result.textContent = error instanceof ApiError ? `${error.status}: ${error.message}` : error.message;
+    candidates = [];
+    renderCandidates();
+    setIndexStatus(`Search failed. ${describeFailure(error)}`, "bad");
+  } finally {
+    setKnowledgeBusy(false);
   }
-  refreshKnowledge();
+}
+
+function renderIndexResults(response) {
+  const subjects = new Map(candidates.map((thread) => [thread.thread_id, thread.subject]));
+  const rows = [];
+  for (const thread of response.indexed) {
+    const subject = thread.subject || subjects.get(thread.thread_id) || thread.thread_id;
+    if (thread.chunks === 0) {
+      rows.push(el("li", "warn", `${subject}: no text to index, nothing stored.`));
+      continue;
+    }
+    const replaced = thread.replaced_chunks ? `, replacing the ${plural(thread.replaced_chunks, "chunk")} indexed before` : "";
+    rows.push(el("li", "ok", `${subject}: ${plural(thread.chunks, "chunk")} from ${plural(thread.messages, "message")}${replaced}.`));
+  }
+  for (const failure of response.failed) {
+    const subject = subjects.get(failure.thread_id) || failure.thread_id;
+    rows.push(el("li", "bad", `${subject}: not indexed. ${failure.error}`));
+  }
+  $("index-results").replaceChildren(...rows);
+}
+
+async function indexSelected() {
+  const threadIds = selectedThreadIds();
+  if (!threadIds.length || knowledgeBusy) return;
+  setKnowledgeBusy(true);
+  setIndexStatus(`Indexing ${plural(threadIds.length, "thread")}…`);
+  $("index-results").replaceChildren();
+  try {
+    const response = await api("/context/threads", { method: "POST", body: { thread_ids: threadIds } });
+    renderIndexResults(response);
+    const stored = response.indexed.filter((thread) => thread.chunks > 0);
+    const chunks = stored.reduce((total, thread) => total + thread.chunks, 0);
+    const failed = response.failed.length ? ` ${response.failed.length} failed.` : "";
+    setIndexStatus(
+      `Indexed ${stored.length} of ${plural(threadIds.length, "thread")}: ${plural(chunks, "chunk")} stored.${failed}`,
+      response.failed.length || stored.length < threadIds.length ? "bad" : "ok"
+    );
+    const counts = new Map(response.indexed.map((thread) => [thread.thread_id, thread.chunks]));
+    candidates = candidates.map((thread) =>
+      counts.has(thread.thread_id) ? { ...thread, indexed_chunks: counts.get(thread.thread_id) } : thread
+    );
+    renderCandidates();
+  } catch (error) {
+    // The counts above (refreshed below) show what the store holds now.
+    setIndexStatus(`Indexing failed. ${describeFailure(error)}`, "bad");
+  } finally {
+    setKnowledgeBusy(false);
+    refreshKnowledge();
+  }
 }
 
 async function checkHealth() {
@@ -437,7 +568,12 @@ document.addEventListener("DOMContentLoaded", () => {
     refreshActivity();
     $("instruction").focus();
   });
-  $("index-form").addEventListener("submit", indexThreads);
+  $("thread-search-form").addEventListener("submit", searchThreads);
+  $("index-selected").addEventListener("click", indexSelected);
+  $("select-all").addEventListener("change", (event) => {
+    document.querySelectorAll("#thread-list input").forEach((box) => (box.checked = event.target.checked));
+    updateSelection();
+  });
   $("knowledge-panel").addEventListener("toggle", (event) => {
     if (event.target.open) refreshKnowledge();
   });
