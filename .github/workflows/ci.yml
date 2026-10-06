@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      # No credentials here: Gmail and the model are faked, and the
+      # integration tests skip themselves unless MAILPILOT_RUN_INTEGRATION_TESTS=1.
+      - name: Unit tests
+        run: pytest -q
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t mailpilot:ci .
+      - name: Smoke test
+        env:
+          KEY: ci-only-key-not-a-secret-0123456789
+        run: |
+          docker run -d --name mailpilot -p 127.0.0.1:8000:8000 -e MAILPILOT_API_KEY="$KEY" mailpilot:ci
+          for attempt in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/api/v1/health && break
+            sleep 2
+          done
+          set -x
+          curl -fsS http://127.0.0.1:8000/api/v1/health
+          curl -fsS -o /dev/null http://127.0.0.1:8000/ui/
+          # The API itself needs the key...
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/v1/metrics)" = "401"
+          curl -fsS -H "X-API-Key: $KEY" http://127.0.0.1:8000/api/v1/metrics
+          # ...and runs as the unprivileged user, healthy.
+          test "$(docker exec mailpilot id -u)" = "10001"
+          for attempt in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' mailpilot)" = "healthy" ] && break
+            sleep 3
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' mailpilot)" = "healthy"
+      - name: Container logs
+        if: always()
+        run: docker logs mailpilot || true

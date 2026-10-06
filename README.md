@@ -536,6 +536,11 @@ the guardrails, prompt injection, idempotency, redaction, metrics, the API
 hardening, the Gmail client against a stub service, the providers against
 a stub Ollama, ChromaDB on disk, and all 16 evaluation scenarios.
 
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and on
+every pull request. It runs the unit tests on Python 3.11 and 3.12, and
+builds and smoke-tests the Docker image (see [Docker](#docker)). CI has no
+credentials, so it never runs the integration tests.
+
 The integration tests (`tests/integration/`) are skipped unless enabled.
 They **only read** from Gmail: labels, search, a message and its thread,
 and a bad id. They exercise the real model (tool calling, structured
@@ -620,9 +625,20 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
 - The container runs as an unprivileged user (uid 10001) and has a health
   check on `/api/v1/health`.
 
-**This image has not been built.** Docker wasn't available where it was
-written. A clean `pip install .` (the build stage's step) was verified,
-and the API served all endpoints from that install outside the repository.
+**This image has not been built yet.** Docker wasn't available where it
+was written. A clean `pip install .` (the build stage's step) was
+verified, and the API served all endpoints from that install outside the
+repository.
+
+The CI workflow builds the image and smoke-tests it on every push. The
+smoke test checks:
+
+- that the image starts, and `/health` and the web app respond;
+- that the API answers `401` without the key and `200` with it;
+- that it runs as uid 10001;
+- that Docker reports it healthy.
+
+The image will have been built for the first time once that has run.
 
 ## Choosing the LLM provider
 
