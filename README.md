@@ -513,6 +513,12 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
   which the container doesn't have, so `secrets/token.json` must already
   exist. The mount must be writable, because the token is refreshed in
   place.
+- **Linux file ownership.** A bind mount keeps the host's owner, and the
+  image's user (uid 10001) can't write to a directory you own. On Docker
+  Engine for Linux, add `--user "$(id -u):$(id -g)" -e HOME=/tmp` so the
+  container runs as you. Without it, refreshing the token fails, and so
+  does every Gmail call, and the vector store can't be created. Docker
+  Desktop on macOS and Windows maps ownership for you.
 - **Ollama on the host** is `host.docker.internal` from inside the
   container. On Linux, add `--add-host=host.docker.internal:host-gateway`.
 - The server listens on `0.0.0.0` *inside* the container. Publish the port
