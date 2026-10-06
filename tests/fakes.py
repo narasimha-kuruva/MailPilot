@@ -39,6 +39,10 @@ class FakeGmailClient(GmailClient):
         )
         self._thread_messages: list[EmailMessage] | None = None
 
+    def set_message(self, message: EmailMessage) -> None:
+        """Override what `search_messages`/`get_message` return (default: the fixture message)."""
+        self._message = message
+
     def set_thread_messages(self, messages: list[EmailMessage]) -> None:
         """Override what `get_thread` returns (default: the single fixture message)."""
         self._thread_messages = messages

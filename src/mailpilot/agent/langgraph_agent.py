@@ -22,6 +22,7 @@ from mailpilot.agent.graph import (
     TERMINATION_AUDIT_NAMES,
     AgentGraph,
     PendingToolCall,
+    fence_tool_output,
     initial_graph_state,
     serialize_result,
 )
@@ -217,7 +218,9 @@ class LangGraphAgent(Agent):
             )
         )
 
-        tool_message = ToolMessage(content=content, tool_call_id=pending.tool_call_id, name=pending.tool_name)
+        tool_message = ToolMessage(
+            content=fence_tool_output(content, status), tool_call_id=pending.tool_call_id, name=pending.tool_name
+        )
         history = [*snapshot.values["messages"], tool_message]
         try:
             final_response: AIMessage = await self._invoke_model(

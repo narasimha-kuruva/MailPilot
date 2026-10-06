@@ -51,6 +51,7 @@ from mailpilot.config import Settings
 from mailpilot.logging_config import get_logger
 from mailpilot.mcp.base import MCPTool
 from mailpilot.mcp.langchain_adapter import to_langchain_tool
+from mailpilot.prompts import TOOL_RESULT_LABEL, wrap_untrusted
 from mailpilot.resilience import describe_error, with_retries, with_timeout
 from mailpilot.safety.policy import requires_approval
 from mailpilot.schemas.agent import ApprovalStatus
@@ -160,6 +161,20 @@ def serialize_result(result: Any) -> str:
     return json.dumps(result, default=str)
 
 
+def fence_tool_output(content: str, status: ToolCallStatus) -> str:
+    """What the model reads back for a tool call (Phase 5.2).
+
+    A successful result can carry email text -- a body from `read_email`, a
+    thread, a subject line -- that someone other than the user wrote, so it
+    is fenced as untrusted data, the same way the intelligence and drafting
+    prompts fence what they insert. Error, skip, and hold messages are
+    MailPilot's own text and stay as they are.
+    """
+    if status is ToolCallStatus.SUCCESS:
+        return wrap_untrusted(TOOL_RESULT_LABEL, content)
+    return content
+
+
 def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -267,7 +282,9 @@ def build_agent_graph(
                     approval_status=ApprovalStatus.NOT_REQUIRED,
                 )
             )
-            tool_messages.append(ToolMessage(content=content, tool_call_id=call["id"], name=call["name"]))
+            tool_messages.append(
+                ToolMessage(content=fence_tool_output(content, status), tool_call_id=call["id"], name=call["name"])
+            )
 
         return {"messages": tool_messages, "tool_call_count": tool_call_count}
 
