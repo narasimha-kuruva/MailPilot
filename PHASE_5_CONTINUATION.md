@@ -5,11 +5,10 @@ session can read this file plus the code itself and resume exactly where work
 stopped, without re-deriving context. Delete this file once Phase 5 is fully
 verified and the final report has been delivered.
 
-**Last known state:** all tests passing (last full run: 74 passed). Currently
-mid-way through a safety/quality hardening pass on top of Phase 5, triggered
-by findings from six parallel background code-review agents (see "Code review
-findings" section below — most are addressed, a handful are intentionally
-deferred and documented as known limitations).
+**Last known state (2026-10-06):** all tests passing. Sections A, B, B2, B3,
+C, C2, C3 are done and committed; section D is being worked through in order,
+one commit per item (the user asked for "commit after each item"). See each
+D item's DONE note for what landed.
 
 ---
 
@@ -393,15 +392,20 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
 
 ### D. Not yet started at all (full Phase 5 checklist items)
 
-10. **Phase 5.1 Security — redaction + safe logging.** Add
-    `mailpilot/security/redaction.py` (or top-level `redaction.py`) with a
-    `redact_secrets(text: str) -> str` regex-based scrubber (Google API key
-    pattern `AIza[0-9A-Za-z_-]{35}`, generic `Bearer <token>`, long
-    base64/hex blobs resembling OAuth tokens). Apply it as defense-in-depth
-    in `logging_config.StructuredFormatter.format()` (scrub the final JSON
-    string) and/or in `InMemoryAuditService.record()` before logging.
-    Add a test proving a fake API-key-shaped string in a log message comes
-    out redacted.
+10. ✅ **DONE (2026-10-06)** -- Phase 5.1 redaction + safe logging. New
+    `mailpilot/redaction.py`: `redact_text()` (by shape: `AIza` API keys,
+    `ya29.` access tokens, `1//` refresh tokens, `GOCSPX-` client secrets,
+    JWTs, `Bearer` headers; by label: `access_token=`, `"client_secret":`,
+    `password:` ...), `redact_value()` (recursive; values under
+    `SENSITIVE_KEYS` replaced outright unless empty). Deliberately no generic
+    "long random string" rule (would mangle Gmail ids / thought signatures).
+    `StructuredFormatter.format()` redacts the whole payload (message,
+    exception, extra_fields) and anything rendered via `default=str`.
+    `InMemoryAuditService.record()` stores the record redacted (so
+    `GET /agent/{id}/audit` never serves a secret back); the `AuditService`
+    docstring makes that a requirement for future implementations. The LLM
+    still sees unredacted tool results (only logs/audit are scrubbed).
+    Tests: `tests/test_redaction.py` (24).
 
 11. **Phase 5.2 Prompt injection tests.** `prompts.py` already has
     `wrap_untrusted()` / `UNTRUSTED_CONTENT_NOTICE` / `GROUNDING_NOTICE` and
@@ -673,11 +677,9 @@ without a good reason, each was a considered trade-off:**
 
 ## How to resume
 
-1. `cd e:\NarasimhaPersonalProjects\MailPilot`
+1. `cd D:\MailPilot`
 2. `source .venv/Scripts/activate` (the venv already has all deps installed)
-3. `python -m pytest -q` — confirm still green before making any change
-   (last known count: 74 passed, plus 2 more approval-description tests
-   added after that count was taken — re-run full suite first thing).
+3. `python -m pytest -q` -- confirm still green before making any change.
 4. Work through section **A**, then **B**, then **C**, then **D** (10-18) in
    order, running the full suite after each numbered item or small group of
    related items — this project's convention throughout has been "verify

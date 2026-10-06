@@ -4,6 +4,10 @@ Uses the standard library `logging` module with a JSON-ish structured
 formatter so log lines are easy to parse later (e.g. by the audit layer or
 an external log aggregator), without pulling in an extra dependency for
 Phase 1.
+
+Every line is scrubbed by `mailpilot.redaction` before it is written
+(Phase 5.1), so an API key or OAuth token that ends up in a message, an
+exception, or `extra_fields` never reaches the log output.
 """
 
 from __future__ import annotations
@@ -14,9 +18,11 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from mailpilot.redaction import redact_text, redact_value
+
 
 class StructuredFormatter(logging.Formatter):
-    """Renders log records as single-line JSON objects."""
+    """Renders log records as single-line JSON objects, with secrets redacted."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -34,7 +40,8 @@ class StructuredFormatter(logging.Formatter):
         if extra:
             payload.update(extra)
 
-        return json.dumps(payload, default=str)
+        # Objects json can't encode are rendered with str() and scrubbed too.
+        return json.dumps(redact_value(payload), default=lambda value: redact_text(str(value)))
 
 
 def configure_logging(log_level: str = "INFO") -> None:
