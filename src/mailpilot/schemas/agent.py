@@ -68,14 +68,21 @@ class AgentRunStatus(StrEnum):
 class PendingApproval(BaseModel):
     """Describes the single action blocked on a human decision."""
 
+    approval_id: str = Field(description="Send this back with the decision. It is the action's step_id in the audit trail.")
     tool_name: str
     tool_args: dict = Field(default_factory=dict)
     description: str
 
 
 class ApprovalDecision(BaseModel):
-    """A human's decision on a `PendingApproval`."""
+    """A human's decision on a `PendingApproval`.
 
+    The decision names the approval it answers, so it can only ever act on
+    the action the person was shown -- never on a different one that took
+    its place since.
+    """
+
+    approval_id: str = Field(..., min_length=1, max_length=200)
     approved: bool
 
 

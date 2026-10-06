@@ -403,3 +403,92 @@ async def test_continuing_after_an_approval_gets_a_fresh_time_budget() -> None:
 
     assert state.status == AgentRunStatus.COMPLETED
     assert state.final_response == "Sent."
+
+
+def _send(draft_id: str, call_id: str) -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": draft_id}, "id": call_id}])
+
+
+@pytest.mark.asyncio
+async def test_a_decision_only_acts_on_the_approval_it_names() -> None:
+    """Approving an old card must never send whatever is pending now."""
+    chat_model = FakeChatModel([_send("draft-1", "call_a"), _send("draft-2", "call_b"), AIMessage(content="Sent.")])
+    agent, gmail_client, _ = _build_agent(chat_model)
+
+    card_a = await agent.run(AgentRequest(instruction="reply to alice", conversation_id="c-cards"))
+    card_b = await agent.run(AgentRequest(instruction="also email mallory", conversation_id="c-cards"))
+    assert (card_a.pending_approval.approval_id, card_b.pending_approval.approval_id) == ("call_a", "call_b")
+
+    with pytest.raises(ValueError, match="not pending"):
+        await agent.resume("c-cards", approved=True, approval_id="call_a")
+    assert gmail_client.sent_draft_ids == []
+
+    state = await agent.resume("c-cards", approved=True, approval_id="call_b")
+    assert state.status == AgentRunStatus.COMPLETED
+    assert gmail_client.sent_draft_ids == ["draft-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_instruction_withdraws_the_pending_action() -> None:
+    chat_model = FakeChatModel([_send("draft-1", "call_a"), AIMessage(content="Here is your summary.")])
+    agent, gmail_client, audit_service = _build_agent(chat_model)
+
+    await agent.run(AgentRequest(instruction="reply to alice", conversation_id="c-new"))
+    state = await agent.run(AgentRequest(instruction="actually, summarize my inbox", conversation_id="c-new"))
+
+    assert state.final_response == "Here is your summary."
+    with pytest.raises(ValueError):
+        await agent.resume("c-new", approved=True)
+    assert gmail_client.sent_draft_ids == []
+    # The model was told the send didn't happen, before the new instruction:
+    # every tool call it made has an answer.
+    seen = chat_model.invocations[1]
+    answer = next(m for m in seen if getattr(m, "tool_call_id", None) == "call_a")
+    assert "withdrawn" in answer.content
+    assert seen.index(answer) < len(seen) - 1 and seen[-1].content == "actually, summarize my inbox"
+    withdrawn = (await audit_service.get_history("c-new"))[-1]
+    assert (withdrawn.tool_name, withdrawn.approval_status) == ("send_email", ApprovalStatus.CANCELLED)
+    assert await agent._approval_service.get_status("c-new", "call_a") is ApprovalStatus.CANCELLED
+
+
+class _SlowFakeChatModel(FakeChatModel):
+    """Takes a while to answer the calls numbered in `slow_calls` (0-based)."""
+
+    def __init__(self, responses: list, slow_calls: set[int]) -> None:
+        super().__init__(responses)
+        self._slow_calls = slow_calls
+
+    async def ainvoke(self, messages: list) -> object:
+        call = self._index
+        response = await super().ainvoke(messages)
+        if call in self._slow_calls:
+            await asyncio.sleep(0.2)
+        return response
+
+
+@pytest.mark.asyncio
+async def test_a_run_waits_for_a_decision_in_progress_on_the_same_conversation() -> None:
+    """Both continue the same conversation; neither may erase what the other did."""
+    chat_model = _SlowFakeChatModel(
+        [_send("draft-1", "call_a"), AIMessage(content="Sent."), AIMessage(content="Nothing else is new.")],
+        slow_calls={1},  # the model call after the send
+    )
+    agent, gmail_client, _ = _build_agent(chat_model)
+    await agent.run(AgentRequest(instruction="reply to alice", conversation_id="c-race"))
+
+    decision = asyncio.create_task(agent.resume("c-race", approved=True))
+    await asyncio.sleep(0.05)  # the email is sent; the decision's run is still going
+    follow_up = await agent.run(AgentRequest(instruction="anything else new?", conversation_id="c-race"))
+    resumed = await decision
+
+    assert (resumed.final_response, follow_up.final_response) == ("Sent.", "Nothing else is new.")
+    assert gmail_client.sent_draft_ids == ["draft-1"]
+    snapshot = await agent._agent_graph.graph.aget_state({"configurable": {"thread_id": "c-race"}})
+    history = [(type(m).__name__, getattr(m, "tool_call_id", None) or m.content) for m in snapshot.values["messages"]]
+    assert history[-5:] == [
+        ("AIMessage", ""),  # the send
+        ("ToolMessage", "call_a"),  # its result: the conversation remembers the email went out
+        ("AIMessage", "Sent."),
+        ("HumanMessage", "anything else new?"),
+        ("AIMessage", "Nothing else is new."),
+    ]

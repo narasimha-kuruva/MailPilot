@@ -35,3 +35,7 @@ class InMemoryApprovalService(ApprovalService):
     async def mark_expired(self, conversation_id: str, step_id: str) -> ApprovalStatus:
         self._decisions[(conversation_id, step_id)] = ApprovalStatus.EXPIRED
         return ApprovalStatus.EXPIRED
+
+    async def mark_cancelled(self, conversation_id: str, step_id: str) -> ApprovalStatus:
+        self._decisions[(conversation_id, step_id)] = ApprovalStatus.CANCELLED
+        return ApprovalStatus.CANCELLED

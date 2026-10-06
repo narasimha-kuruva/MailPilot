@@ -38,3 +38,8 @@ class ApprovalService(ABC):
     async def mark_expired(self, conversation_id: str, step_id: str) -> ApprovalStatus:
         """Record that a pending approval's TTL elapsed before a decision was made."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def mark_cancelled(self, conversation_id: str, step_id: str) -> ApprovalStatus:
+        """Record that a pending approval was withdrawn: a new instruction arrived before a decision."""
+        raise NotImplementedError

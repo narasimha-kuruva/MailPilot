@@ -33,9 +33,14 @@ async def plan_agent(request: AgentRequest, agent: AgentDep) -> AgentPlan:
 async def submit_decision(
     conversation_id: str, decision: ApprovalDecision, agent: AgentDep
 ) -> AgentRunState:
-    """Approve or reject the action a run is currently AWAITING_APPROVAL for."""
+    """Approve or reject the action a run is currently AWAITING_APPROVAL for.
+
+    `approval_id` must be the `pending_approval.approval_id` that run returned.
+    A new instruction in the conversation withdraws a pending action, so its
+    old approval_id then gets a 404 and nothing runs.
+    """
     try:
-        return await agent.resume(conversation_id, decision.approved)
+        return await agent.resume(conversation_id, decision.approved, approval_id=decision.approval_id)
     except ApprovalExpiredError as exc:
         raise HTTPException(status_code=410, detail=str(exc)) from exc
     except ValueError as exc:

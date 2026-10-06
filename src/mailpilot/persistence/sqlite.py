@@ -155,6 +155,9 @@ class SqliteApprovalService(ApprovalService):
     async def mark_expired(self, conversation_id: str, step_id: str) -> ApprovalStatus:
         return await self._set(conversation_id, step_id, ApprovalStatus.EXPIRED)
 
+    async def mark_cancelled(self, conversation_id: str, step_id: str) -> ApprovalStatus:
+        return await self._set(conversation_id, step_id, ApprovalStatus.CANCELLED)
+
 
 class SqlitePendingCallStore(PendingCallStore):
     def __init__(self, database: SqliteDatabase) -> None:
@@ -168,12 +171,16 @@ class SqlitePendingCallStore(PendingCallStore):
             )
         )
 
-    async def take(self, conversation_id: str) -> tuple[PendingToolCall, float] | None:
+    async def take(
+        self, conversation_id: str, tool_call_id: str | None = None
+    ) -> tuple[PendingToolCall, float] | None:
         # One statement under the database lock: two decisions racing for the
         # same conversation get the row once between them.
         row = await self._db.run(
             lambda conn: conn.execute(
-                "DELETE FROM pending_calls WHERE conversation_id = ? RETURNING call, requested_at", (conversation_id,)
+                "DELETE FROM pending_calls WHERE conversation_id = ? "
+                "AND (? IS NULL OR json_extract(call, '$.tool_call_id') = ?) RETURNING call, requested_at",
+                (conversation_id, tool_call_id, tool_call_id),
             ).fetchone()
         )
         return (PendingToolCall.model_validate_json(row[0]), row[1]) if row else None

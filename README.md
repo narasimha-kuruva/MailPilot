@@ -95,7 +95,7 @@ endpoint from the browser.
 | Endpoint | What it does |
 |---|---|
 | `POST /api/v1/agent/run` | Submit an instruction: `{"instruction": "...", "conversation_id": "optional"}`. Returns the run's state. |
-| `POST /api/v1/agent/{conversation_id}/decision` | Approve or reject the action a run is waiting on: `{"approved": true}`. |
+| `POST /api/v1/agent/{conversation_id}/decision` | Approve or reject the action a run is waiting on: `{"approval_id": "...", "approved": true}`, with the `approval_id` from that run's `pending_approval`. |
 | `POST /api/v1/agent/plan` | Preview the steps the agent would take for an instruction (same body as `/run`). Nothing runs; the mailbox and the conversation are untouched. |
 | `GET /api/v1/agent/{conversation_id}/audit` | Every tool call in the conversation, with arguments, outcome, approval and timing. |
 | `GET /api/v1/metrics` | Counters since start: runs, tool calls, approvals, model calls, and tokens. |
@@ -121,6 +121,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/agent/run \
   "conversation_id": "5b0c…",
   "status": "awaiting_approval",
   "pending_approval": {
+    "approval_id": "call_7f…",
     "tool_name": "send_email",
     "tool_args": {"draft_id": "r-81…"},
     "description": "Send email to: bob@example.com\nSubject: Re: Lunch on Thursday?\n\nThursday works for me. See you then!"
@@ -133,7 +134,7 @@ Nothing has been sent at this point. After reading the description:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/agent/5b0c…/decision \
-  -H "Content-Type: application/json" -d '{"approved": true}'
+  -H "Content-Type: application/json" -d '{"approval_id": "call_7f…", "approved": true}'
 # {"conversation_id": "5b0c…", "status": "completed", "final_response": "Your reply to Bob has been sent.", …}
 
 curl -s http://127.0.0.1:8000/api/v1/agent/5b0c…/audit
@@ -146,7 +147,7 @@ curl -s http://127.0.0.1:8000/api/v1/agent/5b0c…/audit
 |---|---|
 | `401` | A key is configured and the request didn't send it, or sent a wrong one (see [Access](#access)) |
 | `403` | No key is configured and the request didn't come from this machine |
-| `404` | `/decision` for a conversation with nothing pending |
+| `404` | `/decision` for an approval that isn't pending: already decided, or withdrawn by a newer instruction. Nothing was run |
 | `410` | `/decision` after the approval expired (`APPROVAL_TTL_SECONDS`, default 30 minutes); nothing was sent |
 | `422` | Invalid input, e.g. an empty instruction or one over 10,000 characters |
 | `500` | Anything unexpected. The body is a generic message plus a `request_id`; the details are in the server log under that id |
@@ -416,6 +417,14 @@ everything else.
   something a person can review.
 - **Batching doesn't bypass it.** If the model requests a send together
   with other calls, the whole turn is held.
+- **A decision answers one approval.** It names the `approval_id` it was
+  shown, so it can never act on a different action that took its place.
+  Sending a new instruction instead of deciding withdraws the pending
+  action: it is audited as cancelled, the model is told it didn't run,
+  and its approval card can no longer be approved.
+- **One request at a time per conversation.** A decision that arrives
+  while a run of the same conversation is still working waits for it,
+  so neither overwrites the other's history.
 - **Expiry:** an approval older than `APPROVAL_TTL_SECONDS` is refused
   with `410` and recorded as expired.
 - **Once per action:** the idempotency guard keys an action by tool and

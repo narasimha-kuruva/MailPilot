@@ -43,7 +43,7 @@ def test_without_a_key_other_web_pages_are_refused_even_from_this_machine(header
 
     for path in PROTECTED:
         assert api.get(path, headers=headers).status_code == 403
-    decision = api.post("/api/v1/agent/c1/decision", json={"approved": True}, headers=headers)
+    decision = api.post("/api/v1/agent/c1/decision", json={"approval_id": "a1", "approved": True}, headers=headers)
     assert decision.status_code == 403
     assert "localhost" in decision.json()["detail"]
 

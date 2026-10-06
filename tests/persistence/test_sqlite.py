@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from mailpilot.agent.graph import build_agent_graph
 from mailpilot.agent.langgraph_agent import LangGraphAgent
-from mailpilot.agent.pending import PendingToolCall
+from mailpilot.agent.pending import InMemoryPendingCallStore, PendingToolCall
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.persistence.sqlite import (
     PersistentState,
@@ -82,6 +82,27 @@ async def test_a_pending_call_is_taken_exactly_once(db: SqliteDatabase) -> None:
 
     assert [r for r in results if r is not None] == [(call, 1000.0)]
     assert await store.take("c1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_store", [SqlitePendingCallStore, lambda _: InMemoryPendingCallStore()])
+async def test_a_decision_for_another_call_takes_nothing(db: SqliteDatabase, make_store) -> None:
+    store = make_store(db)
+    call = PendingToolCall(tool_call_id="t2", tool_name="send_email", tool_args={"draft_id": "d2"})
+    await store.put("c1", call, requested_at=1000.0)
+
+    assert await store.take("c1", "t1") is None  # a card for an earlier call
+    assert await store.take("c1", "t2") == (call, 1000.0)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_approval_is_stored(db: SqliteDatabase) -> None:
+    approvals = SqliteApprovalService(db)
+    await approvals.request_approval("c1", "s1", "Send email to: bob@example.com")
+
+    await approvals.mark_cancelled("c1", "s1")
+
+    assert await SqliteApprovalService(db).get_status("c1", "s1") is ApprovalStatus.CANCELLED
 
 
 def test_completed_actions_outlive_the_guard(db: SqliteDatabase) -> None:

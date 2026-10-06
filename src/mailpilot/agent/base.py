@@ -28,10 +28,16 @@ class Agent(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def resume(self, conversation_id: str, approved: bool) -> AgentRunState:
+    async def resume(
+        self, conversation_id: str, approved: bool, *, approval_id: str | None = None
+    ) -> AgentRunState:
         """Continue a run that is `AWAITING_APPROVAL` with the human's decision.
 
-        Raises `ValueError` if there is no pending approval for
-        `conversation_id`.
+        `approval_id` (`PendingApproval.approval_id`) names the approval being
+        decided. The HTTP API always passes it; leaving it out decides whatever
+        is pending, which only a caller that just ran the conversation itself
+        can know.
+
+        Raises `ValueError` if that approval isn't pending for `conversation_id`.
         """
         raise NotImplementedError

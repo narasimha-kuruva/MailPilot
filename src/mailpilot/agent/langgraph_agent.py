@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -92,6 +93,12 @@ def _decision_outcome(tool_name: str, approved: bool, status: ToolCallStatus) ->
     return f"The approved '{tool_name}' action was attempted but failed."
 
 
+WITHDRAWN = (
+    "Not executed: the user gave a new instruction instead of approving or rejecting this, "
+    "so the request was withdrawn."
+)
+
+
 class LangGraphAgent(Agent):
     def __init__(
         self,
@@ -129,6 +136,17 @@ class LangGraphAgent(Agent):
         # Run outcomes only; tool calls and approvals reach the metrics
         # through the audit service, model usage through the model's callback.
         self._metrics = metrics
+        # One run or decision at a time per conversation. Two at once would
+        # each continue from the same checkpoint, and whichever wrote last
+        # would erase the other -- including the record that an email went
+        # out. Held only while in use (weak values).
+        self._conversation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _conversation_lock(self, conversation_id: str) -> asyncio.Lock:
+        lock = self._conversation_locks.get(conversation_id)
+        if lock is None:
+            lock = self._conversation_locks[conversation_id] = asyncio.Lock()
+        return lock
 
     async def _invoke_model(self, call: Callable[[], Any]) -> Any:
         """One model call under the graph's LLM timeout/retry policy (see `agent_node`)."""
@@ -166,6 +184,10 @@ class LangGraphAgent(Agent):
 
     async def run(self, request: AgentRequest) -> AgentRunState:
         conversation_id = request.conversation_id or str(uuid4())
+        async with self._conversation_lock(conversation_id):
+            return await self._run(conversation_id, request)
+
+    async def _run(self, conversation_id: str, request: AgentRequest) -> AgentRunState:
         config = {"configurable": {"thread_id": conversation_id}}
 
         existing = await self._agent_graph.graph.aget_state(config)
@@ -173,6 +195,10 @@ class LangGraphAgent(Agent):
         messages: list[Any] = [HumanMessage(request.instruction)]
         if is_new_conversation:
             messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT), *messages]
+        else:
+            withdrawn = await self._withdraw_pending(conversation_id, existing.values.get("instruction", ""))
+            if withdrawn is not None:
+                messages = [withdrawn, *messages]
 
         started = time.perf_counter()
         try:
@@ -191,10 +217,51 @@ class LangGraphAgent(Agent):
         if self._metrics is not None:
             self._metrics.record_run(status, (time.perf_counter() - started) * 1000)
 
-    async def resume(self, conversation_id: str, approved: bool) -> AgentRunState:
+    async def _withdraw_pending(self, conversation_id: str, instruction: str) -> ToolMessage | None:
+        """A new instruction while an action awaits a decision withdraws that action.
+
+        Its approval card can no longer be acted on (`resume()` finds nothing),
+        and the model is told the action didn't run, so the conversation it
+        sees stays well-formed: every tool call answered.
+        """
         entry = await self._pending_store.take(conversation_id)
         if entry is None:
-            raise ValueError(f"No pending approval for conversation '{conversation_id}'.")
+            return None
+        pending, _ = entry
+        await self._approval_service.mark_cancelled(conversation_id, pending.tool_call_id)
+        await self._audit_service.record(
+            AuditRecord(
+                conversation_id=conversation_id,
+                step_id=pending.tool_call_id,
+                agent_request=instruction,
+                tool_name=pending.tool_name,
+                tool_args=pending.tool_args,
+                status=ToolCallStatus.SKIPPED,
+                result_summary=WITHDRAWN,
+                approval_status=ApprovalStatus.CANCELLED,
+            )
+        )
+        return ToolMessage(
+            content=fence_tool_output(WITHDRAWN, ToolCallStatus.SKIPPED),
+            tool_call_id=pending.tool_call_id,
+            name=pending.tool_name,
+        )
+
+    async def resume(
+        self, conversation_id: str, approved: bool, *, approval_id: str | None = None
+    ) -> AgentRunState:
+        async with self._conversation_lock(conversation_id):
+            return await self._resume(conversation_id, approved, approval_id)
+
+    async def _resume(self, conversation_id: str, approved: bool, approval_id: str | None) -> AgentRunState:
+        entry = await self._pending_store.take(conversation_id, approval_id)
+        if entry is None:
+            if approval_id is None:
+                raise ValueError(f"No pending approval for conversation '{conversation_id}'.")
+            raise ValueError(
+                f"Approval '{approval_id}' is not pending in conversation '{conversation_id}': it was already "
+                "decided, or withdrawn by a newer instruction. Nothing was executed."
+            )
         pending, requested_at = entry
 
         config = {"configurable": {"thread_id": conversation_id}}
@@ -369,13 +436,15 @@ class LangGraphAgent(Agent):
     async def _state_from_result(self, conversation_id: str, result: dict[str, Any]) -> AgentRunState:
         pending = result.get("pending_approval")
         if pending is not None:
-            await self._pending_store.put(conversation_id, pending, self._clock())
             description = await self._build_approval_description(pending)
             await self._approval_service.request_approval(conversation_id, pending.tool_call_id, description)
+            # Last: from here on, a decision can act on it.
+            await self._pending_store.put(conversation_id, pending, self._clock())
             return AgentRunState(
                 conversation_id=conversation_id,
                 status=AgentRunStatus.AWAITING_APPROVAL,
                 pending_approval=PendingApproval(
+                    approval_id=pending.tool_call_id,
                     tool_name=pending.tool_name,
                     tool_args=pending.tool_args,
                     description=description,

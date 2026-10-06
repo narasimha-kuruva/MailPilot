@@ -199,6 +199,7 @@ function renderMessage(message, index) {
         approved: "Approved",
         rejected: "Rejected — not sent",
         expired: "Expired — not sent",
+        withdrawn: "Withdrawn by your next instruction — not sent",
         gone: "No longer pending (the server may have restarted) — not sent",
       };
       node.append(el("div", `outcome ${message.outcome}`, labels[message.outcome] || message.outcome));
@@ -266,6 +267,7 @@ function handleRunState(state) {
   if (state.status === "awaiting_approval" && state.pending_approval) {
     addMessage({
       kind: "approval",
+      approvalId: state.pending_approval.approval_id,
       toolName: state.pending_approval.tool_name,
       description: state.pending_approval.description,
       outcome: null,
@@ -281,7 +283,13 @@ async function send(instruction) {
   try {
     const body = { instruction };
     if (chat.conversationId) body.conversation_id = chat.conversationId;
-    handleRunState(await api("/agent/run", { method: "POST", body }));
+    const state = await api("/agent/run", { method: "POST", body });
+    // The server withdraws an action still waiting for a decision when a new
+    // instruction arrives; its card can't be acted on any more.
+    for (const message of chat.messages) {
+      if (message.kind === "approval" && !message.outcome) message.outcome = "withdrawn";
+    }
+    handleRunState(state);
   } catch (error) {
     reportError(error);
   } finally {
@@ -297,7 +305,7 @@ async function decide(index, approved) {
   try {
     const state = await api(`/agent/${encodeURIComponent(chat.conversationId)}/decision`, {
       method: "POST",
-      body: { approved },
+      body: { approval_id: message.approvalId, approved },
     });
     message.outcome = approved ? "approved" : "rejected";
     saveChat();

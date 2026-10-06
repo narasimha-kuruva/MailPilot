@@ -125,8 +125,10 @@ async def _run(
         draft = mailbox.drafts.get(str(state.pending_approval.tool_args.get("draft_id", "")))
         pending_draft = draft.message.model_copy(deep=True) if draft else None
     final_state = None
-    if state.status is AgentRunStatus.AWAITING_APPROVAL and scenario.decision is not None:
-        final_state = await agent.resume(scenario.id, scenario.decision)
+    if state.pending_approval is not None and scenario.decision is not None:
+        final_state = await agent.resume(
+            scenario.id, scenario.decision, approval_id=state.pending_approval.approval_id
+        )
 
     history = await audit.get_history(scenario.id)
     outcome = ScenarioOutcome(

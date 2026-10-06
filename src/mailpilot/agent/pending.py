@@ -47,8 +47,14 @@ class PendingCallStore(ABC):
         """Record the call a conversation now waits on (replacing any earlier one)."""
 
     @abstractmethod
-    async def take(self, conversation_id: str) -> tuple[PendingToolCall, float] | None:
-        """Remove and return the conversation's pending call, or None. Atomic."""
+    async def take(
+        self, conversation_id: str, tool_call_id: str | None = None
+    ) -> tuple[PendingToolCall, float] | None:
+        """Remove and return the conversation's pending call, or None. Atomic.
+
+        With `tool_call_id`, only that call: a decision made on one approval
+        card must never act on a different call that replaced it.
+        """
 
 
 class InMemoryPendingCallStore(PendingCallStore):
@@ -58,5 +64,11 @@ class InMemoryPendingCallStore(PendingCallStore):
     async def put(self, conversation_id: str, call: PendingToolCall, requested_at: float) -> None:
         self._calls[conversation_id] = (call, requested_at)
 
-    async def take(self, conversation_id: str) -> tuple[PendingToolCall, float] | None:
-        return self._calls.pop(conversation_id, None)  # no await in between: atomic on the event loop
+    async def take(
+        self, conversation_id: str, tool_call_id: str | None = None
+    ) -> tuple[PendingToolCall, float] | None:
+        # No await in between: atomic on the event loop.
+        entry = self._calls.get(conversation_id)
+        if entry is None or (tool_call_id is not None and entry[0].tool_call_id != tool_call_id):
+            return None
+        return self._calls.pop(conversation_id)
