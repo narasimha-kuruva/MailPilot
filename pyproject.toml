@@ -42,3 +42,6 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src"]
+markers = [
+    "integration: real Gmail and a real LLM provider; opt in with MAILPILOT_RUN_INTEGRATION_TESTS=1",
+]

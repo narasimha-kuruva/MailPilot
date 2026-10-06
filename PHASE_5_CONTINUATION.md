@@ -484,16 +484,21 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     email ..." (matching its sibling scenario); rerun: PASS (searched,
     drafted, tried to send, gate held it, rejection -> nothing sent).
 
-15. **Phase 5.9 Testing — separate integration tests.** Add a pytest marker
-    `integration` (register in `pyproject.toml`'s `[tool.pytest.ini_options]`
-    via `markers = ["integration: requires real Gmail/Gemini credentials"]`).
-    Add `tests/integration/test_real_gmail.py` with tests marked
-    `@pytest.mark.integration`, skipped by default unless an env var like
-    `MAILPILOT_RUN_INTEGRATION_TESTS=1` is set (use a module-level
-    `pytestmark = pytest.mark.skipif(...)`). Document in the README how to
-    run them (`pytest -m integration`) and that they need real
-    `GOOGLE_API_KEY` + completed OAuth. These should NOT run in the normal
-    `pytest` invocation used throughout this project.
+15. ✅ **DONE (2026-10-06)** -- Phase 5.9 integration tests. Marker
+    `integration` registered in pyproject; `tests/conftest.py`
+    `pytest_collection_modifyitems` skips every `integration` item unless
+    `MAILPILOT_RUN_INTEGRATION_TESTS=1` (so plain `pytest` never touches
+    real services). `tests/integration/`: `conftest.py` (fixtures FAIL, not
+    skip, on missing token/provider once opted in), `test_real_gmail.py`
+    (labels, search parsing, message+thread read, bad id -> permanent
+    400/404), `test_real_llm.py` (bound tool call, structured output, token
+    usage via LLMUsageCallback, embeddings -- skips if the embedding model
+    isn't pulled), `test_real_agent.py` (read-only agent run via
+    `deps.get_agent()`, asserts no write tool ran). All READ-ONLY.
+    Run: `MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration`.
+    Live result (2026-10-06, ollama/gemma4:e2b + real Gmail): 8 passed,
+    1 skipped (`embeddinggemma` not pulled -> RAG tools can't run live on
+    Ollama until `ollama pull embeddinggemma`).
 
 16. **Phase 5.10 API hardening.** In `main.py`, add a global exception
     handler (`@app.exception_handler(Exception)`) that catches anything
