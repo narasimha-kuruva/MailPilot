@@ -24,10 +24,10 @@ from typing import Annotated
 from fastapi import Depends, HTTPException
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
 
 from mailpilot.agent.base import Agent
 from mailpilot.agent.graph import AgentLimits, build_agent_graph
+from mailpilot.agent.pending import memory_checkpointer
 from mailpilot.agent.langgraph_agent import LangGraphAgent
 from mailpilot.audit.in_memory_audit import InMemoryAuditService
 from mailpilot.audit.service import AuditService
@@ -177,7 +177,7 @@ async def get_agent() -> Agent:
     global _agent
     if _agent is None:
         state = get_persistent_state()
-        checkpointer = state.checkpointer() if state is not None else MemorySaver()
+        checkpointer = state.checkpointer() if state is not None else memory_checkpointer()
         built = await asyncio.to_thread(_build_agent, checkpointer)
         if _agent is None:
             _agent = built

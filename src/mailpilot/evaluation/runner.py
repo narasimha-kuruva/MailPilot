@@ -19,10 +19,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
-
 from mailpilot.agent.graph import AgentLimits, build_agent_graph
 from mailpilot.agent.langgraph_agent import LangGraphAgent
+from mailpilot.agent.pending import memory_checkpointer
 from mailpilot.audit.in_memory_audit import InMemoryAuditService
 from mailpilot.evaluation.expectations import ScenarioOutcome
 from mailpilot.evaluation.mailbox import InMemoryGmailClient
@@ -107,7 +106,7 @@ async def _run(
         chat_model,
         tools,
         audit,
-        checkpointer=MemorySaver(),
+        checkpointer=memory_checkpointer(),
         limits=replace(limits or AgentLimits(), **scenario.limits),
         sleep=sleep,
     )

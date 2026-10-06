@@ -16,12 +16,11 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mailpilot.agent.base import Agent
 from mailpilot.agent.pending import InMemoryPendingCallStore, PendingCallStore, PendingToolCall
 from mailpilot.agent.graph import (
-    TERMINATION_AUDIT_NAMES,
     AgentGraph,
     fence_tool_output,
     initial_graph_state,
@@ -33,7 +32,7 @@ from mailpilot.logging_config import get_logger
 from mailpilot.mcp.base import MCPTool
 from mailpilot.observability.metrics import MetricsRegistry
 from mailpilot.prompts import AGENT_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT
-from mailpilot.resilience import describe_error, with_retries, with_timeout
+from mailpilot.resilience import with_retries, with_timeout
 from mailpilot.safety.approval import ApprovalService
 from mailpilot.safety.idempotency import IdempotencyGuard, idempotency_key
 from mailpilot.schemas.agent import (
@@ -81,6 +80,16 @@ def _message_text(message: BaseMessage) -> str:
                 parts.append(str(block["text"]))
         return "".join(parts)
     return str(content)
+
+
+def _decision_outcome(tool_name: str, approved: bool, status: ToolCallStatus) -> str:
+    if not approved:
+        return f"The '{tool_name}' action was not executed, as you decided."
+    if status is ToolCallStatus.SUCCESS:
+        return f"The approved '{tool_name}' action was executed successfully."
+    if status is ToolCallStatus.SKIPPED:
+        return f"The approved '{tool_name}' action was not executed again: it had already run."
+    return f"The approved '{tool_name}' action was attempted but failed."
 
 
 class LangGraphAgent(Agent):
@@ -238,85 +247,33 @@ class LangGraphAgent(Agent):
         tool_message = ToolMessage(
             content=fence_tool_output(content, status), tool_call_id=pending.tool_call_id, name=pending.tool_name
         )
-        history = [*snapshot.values["messages"], tool_message]
-        try:
-            final_response: AIMessage = await self._invoke_model(
-                lambda: self._agent_graph.llm_with_tools.ainvoke(history)
-            )
-        except Exception as exc:  # noqa: BLE001 - the decision's outcome above must survive this
-            # The approved action already ran (or was skipped) and is audited
-            # above. A wrap-up call that fails for good must not become a
-            # 500: the client would retry /decision, find no pending
-            # approval, and never learn that the email was in fact sent.
-            logger.error(
-                "Language model call failed after approval decision",
-                extra={"extra_fields": {"conversation_id": conversation_id, "error": describe_error(exc)}},
-            )
-            await self._audit_service.record(
-                AuditRecord(
-                    conversation_id=conversation_id,
-                    agent_request=instruction,
-                    tool_name=TERMINATION_AUDIT_NAMES["llm_error"],
-                    status=ToolCallStatus.FAILURE,
-                    result_summary=f"Model call after the approval decision failed: {describe_error(exc)}"[:500],
-                    approval_status=ApprovalStatus.NOT_REQUIRED,
-                )
-            )
-            await self._agent_graph.graph.aupdate_state(config, {"messages": [tool_message], "pending_approval": None})
-            if not approved:
-                outcome = "was not executed, as you decided"
-            elif status is ToolCallStatus.SUCCESS:
-                outcome = "was executed successfully"
-            elif status is ToolCallStatus.SKIPPED:
-                outcome = "was not executed again"
-            else:
-                outcome = "was attempted but failed"
-            return AgentRunState(
-                conversation_id=conversation_id,
-                status=AgentRunStatus.COMPLETED,
-                final_response=(
-                    f"The '{pending.tool_name}' action {outcome} ({content[:200]}). "
-                    "The assistant could not compose a follow-up because the language model call failed: "
-                    f"{describe_error(exc)}. Submit a new instruction to continue."
-                ),
-            )
-
-        final_text = _message_text(final_response)
-        follow_up_calls = getattr(final_response, "tool_calls", None) or []
-        if follow_up_calls:
-            # `resume()` only executes the one approved action -- it does not
-            # re-enter the full tool-execution/approval loop. If the model's
-            # next turn wants to call more tools (including possibly another
-            # sensitive one), those calls are NOT executed and NOT silently
-            # dropped either: they're surfaced here so the caller can see a
-            # follow-up is needed, and audited so it isn't invisible.
-            names = ", ".join(call["name"] for call in follow_up_calls)
-            note = (
-                f"\n\n[MailPilot: the assistant also proposed calling {names} next. "
-                "That was not executed -- submit a new instruction to continue.]"
-            )
-            final_text = f"{final_text}{note}"
-            await self._audit_service.record(
-                AuditRecord(
-                    conversation_id=conversation_id,
-                    agent_request=instruction,
-                    tool_name="__deferred_followup__",
-                    tool_args={"proposed_tools": [call["name"] for call in follow_up_calls]},
-                    status=ToolCallStatus.SKIPPED,
-                    result_summary=f"Model proposed further tool calls after approval ({names}); not executed.",
-                    approval_status=ApprovalStatus.NOT_REQUIRED,
-                )
-            )
-
+        # Continue the run where the approval gate stopped it: the decision's
+        # outcome goes in as if the tools node had produced it, and the graph
+        # runs on from the agent node -- the same loop as run(), so follow-up
+        # tool calls execute normally and another sensitive one stops at the
+        # gate again (the result then comes back AWAITING_APPROVAL). The run
+        # gets a fresh execution budget: the human may have taken a while.
         await self._agent_graph.graph.aupdate_state(
-            config, {"messages": [tool_message, final_response], "pending_approval": None}
+            config,
+            {
+                "messages": [tool_message],
+                "pending_approval": None,
+                "step_count": 0,
+                "tool_call_count": 0,
+                "started_at": time.monotonic(),
+                "terminated_reason": None,
+                "terminated_kind": None,
+            },
+            as_node="tools",
         )
-
-        return AgentRunState(
-            conversation_id=conversation_id,
-            status=AgentRunStatus.COMPLETED,
-            final_response=final_text,
-        )
+        result = await self._agent_graph.graph.ainvoke(None, config=config)
+        state = await self._state_from_result(conversation_id, result)
+        if state.status is AgentRunStatus.FAILED:
+            # The run stopped early after the decision, but what the decision
+            # did must still be said: a client must never think an email that
+            # went out didn't.
+            state.final_response = f"{_decision_outcome(pending.tool_name, approved, status)} {state.final_response}"
+        return state
 
     async def _execute_approved(self, pending: PendingToolCall) -> tuple[str, ToolCallStatus, float | None]:
         """Run an approved action once, unless that same action already ran or is running.

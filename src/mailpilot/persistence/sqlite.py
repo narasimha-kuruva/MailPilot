@@ -33,10 +33,9 @@ from pathlib import Path
 from typing import TypeVar
 
 import aiosqlite
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from mailpilot.agent.pending import PendingCallStore, PendingToolCall
+from mailpilot.agent.pending import PendingCallStore, PendingToolCall, checkpoint_serializer
 from mailpilot.audit.service import AuditService
 from mailpilot.observability.metrics import MetricsRegistry
 from mailpilot.safety.approval import ApprovalService
@@ -201,17 +200,11 @@ class SqliteCompletedActions:
         )
 
 
-# Types stored inside graph state that LangGraph's serializer must be told
-# are safe to rebuild (beyond its own and LangChain's message types).
-_CHECKPOINT_TYPES = [("mailpilot.agent.pending", "PendingToolCall")]
-
-
 def build_checkpointer(path: str | Path) -> AsyncSqliteSaver:
     """LangGraph's SQLite checkpointer. It connects lazily, on first use."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    serde = JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINT_TYPES)
-    return AsyncSqliteSaver(aiosqlite.connect(str(path)), serde=serde)
+    return AsyncSqliteSaver(aiosqlite.connect(str(path)), serde=checkpoint_serializer())
 
 
 @dataclass

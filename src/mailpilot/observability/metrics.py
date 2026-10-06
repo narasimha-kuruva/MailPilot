@@ -6,7 +6,7 @@ existing choke points rather than calls scattered through the agent:
 - **The audit trail.** `InMemoryAuditService.record()` hands every
   `AuditRecord` to `observe_audit()`: tool calls by outcome and duration,
   approval requests and decisions, and run events (`__execution_limit__`,
-  `__llm_error__`, `__deferred_followup__`).
+  `__llm_error__`).
 - **The agent.** `LangGraphAgent.run()` reports each run's outcome and
   duration through `record_run()`.
 - **The chat model.** `LLMUsageCallback` is attached to the model itself,

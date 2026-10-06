@@ -226,7 +226,10 @@ is also how the tests and the evaluation substitute fakes.
    returns `awaiting_approval` with a description of the draft.
 5. `POST /decision` reaches `LangGraphAgent.resume()`. This is the only
    code path that can execute `send_email`, and only on `approved: true`,
-   once per draft. The model then writes the closing message.
+   once per draft. The run then continues in the same loop, from the
+   **agent** node, with the decision's outcome as the latest tool result.
+   Follow-up steps run normally, and another send stops at the gate
+   again.
 6. If a limit is hit (steps, tool calls, wall-clock time) or the model
    fails for good, the **terminate** node ends the run as `failed`, with
    the reason in the response and in the audit trail.
@@ -253,12 +256,17 @@ is not exposed over the API yet.
 
 ### Why the approval gate isn't LangGraph's `interrupt_before`
 
-LangGraph can pause a graph and resume it from the checkpoint. MailPilot
-doesn't use that for sends. `await_approval` ends the run cleanly with the
-pending call in state, and `resume()` explicitly re-reads the state and
-executes (or skips) that one call. That keeps the only path that can send
-email explicit, small, and unit-testable with fakes, instead of depending
-on resume-from-checkpoint semantics.
+LangGraph can pause a graph before a node and resume into it. MailPilot
+doesn't let the graph execute a send at all:
+
+1. `await_approval` ends the run cleanly, with the pending call in state.
+2. `resume()` executes (or skips) that one call itself, under the
+   idempotency guard.
+3. `resume()` then hands the graph the outcome as if the **tools** node
+   had produced it, and continues from the **agent** node.
+
+The graph's own tools node therefore never runs `send_email`. The only path
+that can send email stays explicit, small, and unit-testable with fakes.
 
 ## Tools
 
@@ -365,10 +373,14 @@ everything else.
   is audited as a suppressed duplicate. A failed send releases the key, so
   it can be approved again. (Gmail deletes a sent draft, so re-sending one
   that did go out fails with "not found" rather than sending twice.)
-- **After the decision**, the model writes one closing message. If it
-  asks for more tools at that point, they are not run. They are listed in
-  the response and the audit trail, and the next instruction continues
-  from there.
+- **After the decision**, the run picks up where it stopped. If the model
+  wants more steps, such as starring the original email or sending a
+  second reply, they run like any others, under a fresh execution budget,
+  since the decision may have taken a while. A second send comes back as a
+  new `awaiting_approval`. If the run then fails, for example because the
+  model is down, the response still starts by saying what the decision did
+  ("The approved 'send_email' action was executed successfully."), so a
+  sent email is never mistaken for an unsent one.
 
 ## Safety
 
@@ -425,8 +437,7 @@ summary, approval status (`not_required` / `pending` / `approved` /
 `rejected` / `expired`), duration and timestamp. That covers calls that
 ran, calls held for approval, and duplicates the idempotency guard
 suppressed. Runs that stop early add `__execution_limit__` or
-`__llm_error__` records. Follow-up calls proposed after an approval add
-`__deferred_followup__`. Records are redacted before they are stored,
+`__llm_error__` records. Records are redacted before they are stored,
 written to the log, and served at `GET /agent/{id}/audit`. They are kept
 in SQLite and survive restarts (see [Persistence](#persistence)).
 
@@ -525,7 +536,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 322 unit tests, no network
+pytest                                                       # 325 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -682,9 +693,6 @@ evaluation:
   [Persistence](#persistence).
 - **Not a real MCP server.** The tools are internal; other MCP clients
   can't use them.
-- **After an approval,** the model gets one closing turn. Further tool
-  calls it proposes are reported, not executed, and the next instruction
-  continues the work.
 - **Limits are per instruction**, not per conversation. Each `/run` gets
   a fresh budget. This is deliberate: a runaway *instruction* is what
   needs bounding.

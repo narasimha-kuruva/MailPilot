@@ -15,6 +15,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import BaseModel
 
 
@@ -24,6 +26,19 @@ class PendingToolCall(BaseModel):
     tool_call_id: str
     tool_name: str
     tool_args: dict[str, Any]
+
+
+def checkpoint_serializer() -> JsonPlusSerializer:
+    """LangGraph's serializer, told that `PendingToolCall` -- which graph state
+    holds while a run waits at the approval gate -- is safe to rebuild.
+    LangGraph warns about types it wasn't told about, and is going to refuse
+    them; every checkpointer MailPilot builds uses this."""
+    return JsonPlusSerializer(allowed_msgpack_modules=[("mailpilot.agent.pending", "PendingToolCall")])
+
+
+def memory_checkpointer() -> MemorySaver:
+    """Conversation state in this process only (`STATE_BACKEND=memory`)."""
+    return MemorySaver(serde=checkpoint_serializer())
 
 
 class PendingCallStore(ABC):

@@ -8,11 +8,13 @@ is exercised deterministically with no network access or credentials.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from mailpilot.agent.graph import build_agent_graph
+from mailpilot.agent.graph import AgentLimits, build_agent_graph
 from mailpilot.agent.langgraph_agent import ApprovalExpiredError, LangGraphAgent
 from mailpilot.audit.in_memory_audit import InMemoryAuditService
 from mailpilot.mcp.tools.registry import build_tools
@@ -311,9 +313,10 @@ async def test_resume_reports_the_send_even_when_the_follow_up_model_call_fails(
     await agent.run(AgentRequest(instruction="send the reply", conversation_id="c-llm-fail"))
     state = await agent.resume("c-llm-fail", approved=True)
 
-    assert state.status == AgentRunStatus.COMPLETED
-    assert "send_email" in state.final_response
-    assert "executed successfully" in state.final_response
+    # The run after the decision stopped early -- but the reply leads with
+    # what the decision did.
+    assert state.status == AgentRunStatus.FAILED
+    assert state.final_response.startswith("The approved 'send_email' action was executed successfully.")
     assert "model exploded" in state.final_response
     assert gmail_client.sent_draft_ids == ["draft-1"]  # sent exactly once
 
@@ -325,3 +328,78 @@ async def test_resume_reports_the_send_even_when_the_follow_up_model_call_fails(
     follow_up = await agent.run(AgentRequest(instruction="what happened?", conversation_id="c-llm-fail"))
     assert follow_up.status == AgentRunStatus.COMPLETED
     assert follow_up.final_response == "Still here."
+
+
+@pytest.mark.asyncio
+async def test_after_an_approval_the_agent_carries_on_with_follow_up_steps() -> None:
+    chat_model = FakeChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": "call_1"}]),
+            AIMessage(content="", tool_calls=[{"name": "apply_label", "args": {"message_id": "msg-1", "label_id": "STARRED"}, "id": "call_2"}]),
+            AIMessage(content="Sent, and starred the original."),
+        ]
+    )
+    agent, gmail_client, audit_service = _build_agent(chat_model)
+
+    await agent.run(AgentRequest(instruction="send the reply, then star the email", conversation_id="c-follow"))
+    state = await agent.resume("c-follow", approved=True)
+
+    assert state.status == AgentRunStatus.COMPLETED
+    assert state.final_response == "Sent, and starred the original."
+    assert gmail_client.sent_draft_ids == ["draft-1"]
+    assert ("apply_label", ("msg-1", "STARRED")) in gmail_client.calls  # the follow-up really ran
+    history = await audit_service.get_history("c-follow")
+    assert [r.tool_name for r in history] == ["send_email", "send_email", "apply_label"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_send_after_an_approval_waits_for_its_own_approval() -> None:
+    chat_model = FakeChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": "call_1"}]),
+            AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-2"}, "id": "call_2"}]),
+            AIMessage(content="Both sent."),
+        ]
+    )
+    agent, gmail_client, _ = _build_agent(chat_model)
+
+    await agent.run(AgentRequest(instruction="send both replies", conversation_id="c-two"))
+    after_first = await agent.resume("c-two", approved=True)
+
+    assert after_first.status == AgentRunStatus.AWAITING_APPROVAL
+    assert after_first.pending_approval.tool_args == {"draft_id": "draft-2"}
+    assert gmail_client.sent_draft_ids == ["draft-1"]  # the second is not sent yet
+
+    final = await agent.resume("c-two", approved=True)
+
+    assert final.status == AgentRunStatus.COMPLETED
+    assert gmail_client.sent_draft_ids == ["draft-1", "draft-2"]
+
+
+@pytest.mark.asyncio
+async def test_continuing_after_an_approval_gets_a_fresh_time_budget() -> None:
+    """A human may take longer to decide than a run is allowed to last."""
+    chat_model = FakeChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": "call_1"}]),
+            AIMessage(content="Sent."),
+        ]
+    )
+    gmail_client = FakeGmailClient()
+    tools = build_tools(gmail_client)
+    audit_service = InMemoryAuditService()
+    agent = LangGraphAgent(
+        agent_graph=build_agent_graph(
+            chat_model, tools, audit_service, checkpointer=MemorySaver(), limits=AgentLimits(max_execution_seconds=0.2)
+        ),
+        tools=tools,
+        approval_service=InMemoryApprovalService(),
+        audit_service=audit_service,
+    )
+
+    await agent.run(AgentRequest(instruction="send the reply", conversation_id="c-slow"))
+    await asyncio.sleep(0.3)  # longer than the whole run budget
+    state = await agent.resume("c-slow", approved=True)
+
+    assert state.status == AgentRunStatus.COMPLETED
+    assert state.final_response == "Sent."
