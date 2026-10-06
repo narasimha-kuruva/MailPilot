@@ -30,6 +30,7 @@ from mailpilot.audit.service import AuditService
 from mailpilot.gmail.client import GmailClient
 from mailpilot.logging_config import get_logger
 from mailpilot.mcp.base import MCPTool
+from mailpilot.observability.metrics import MetricsRegistry
 from mailpilot.prompts import AGENT_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT
 from mailpilot.resilience import describe_error, with_retries, with_timeout
 from mailpilot.safety.approval import ApprovalService
@@ -93,6 +94,7 @@ class LangGraphAgent(Agent):
         gmail_client: GmailClient | None = None,
         clock: Callable[[], float] = time.monotonic,
         idempotency_guard: IdempotencyGuard | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self._agent_graph = agent_graph
         self._tools = tools
@@ -111,6 +113,9 @@ class LangGraphAgent(Agent):
         # Shared by every conversation: an approved action runs at most once
         # (Phase 5.5, see mailpilot.safety.idempotency).
         self._idempotency = idempotency_guard or IdempotencyGuard()
+        # Run outcomes only; tool calls and approvals reach the metrics
+        # through the audit service, model usage through the model's callback.
+        self._metrics = metrics
 
     async def _invoke_model(self, call: Callable[[], Any]) -> Any:
         """One model call under the graph's LLM timeout/retry policy (see `agent_node`)."""
@@ -156,11 +161,22 @@ class LangGraphAgent(Agent):
         if is_new_conversation:
             messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT), *messages]
 
-        result = await self._agent_graph.graph.ainvoke(
-            initial_graph_state(conversation_id, request.instruction, messages),
-            config=config,
-        )
-        return await self._state_from_result(conversation_id, result)
+        started = time.perf_counter()
+        try:
+            result = await self._agent_graph.graph.ainvoke(
+                initial_graph_state(conversation_id, request.instruction, messages),
+                config=config,
+            )
+            state = await self._state_from_result(conversation_id, result)
+        except Exception:
+            self._record_run(AgentRunStatus.FAILED, started)
+            raise
+        self._record_run(state.status, started)
+        return state
+
+    def _record_run(self, status: AgentRunStatus, started: float) -> None:
+        if self._metrics is not None:
+            self._metrics.record_run(status, (time.perf_counter() - started) * 1000)
 
     async def resume(self, conversation_id: str, approved: bool) -> AgentRunState:
         entry = self._pending_calls.pop(conversation_id, None)
@@ -192,8 +208,9 @@ class LangGraphAgent(Agent):
 
         await self._approval_service.record_decision(conversation_id, pending.tool_call_id, approved)
 
+        duration_ms: float | None = None
         if approved:
-            content, status = await self._execute_approved(pending)
+            content, status, duration_ms = await self._execute_approved(pending)
             approval_status = ApprovalStatus.APPROVED
         else:
             content = "The user did not approve this action; it was not executed."
@@ -210,6 +227,7 @@ class LangGraphAgent(Agent):
                 status=status,
                 result_summary=content[:500],
                 approval_status=approval_status,
+                duration_ms=duration_ms,
             )
         )
 
@@ -296,8 +314,11 @@ class LangGraphAgent(Agent):
             final_response=final_text,
         )
 
-    async def _execute_approved(self, pending: PendingToolCall) -> tuple[str, ToolCallStatus]:
-        """Run an approved action once, unless that same action already ran or is running."""
+    async def _execute_approved(self, pending: PendingToolCall) -> tuple[str, ToolCallStatus, float | None]:
+        """Run an approved action once, unless that same action already ran or is running.
+
+        Returns the result text, its status, and how long it ran (None if it didn't).
+        """
         key = idempotency_key(pending.tool_name, pending.tool_args)
         if not self._idempotency.try_begin(key):
             previous = self._idempotency.completed_result(key)
@@ -308,11 +329,13 @@ class LangGraphAgent(Agent):
             return (
                 f"Not executed: {reason}. MailPilot never runs an approved '{pending.tool_name}' twice.",
                 ToolCallStatus.SKIPPED,
+                None,
             )
 
         tool = self._tools[pending.tool_name]
         content = f"'{pending.tool_name}' was interrupted before it finished."
         status = ToolCallStatus.FAILURE
+        started = time.perf_counter()
         try:
             # Bounded by the same tool timeout as every other tool call,
             # but never auto-retried -- see mailpilot.gmail.google_client
@@ -329,7 +352,7 @@ class LangGraphAgent(Agent):
                 self._idempotency.complete(key, content)
             else:
                 self._idempotency.abandon(key)
-        return content, status
+        return content, status, (time.perf_counter() - started) * 1000
 
     async def _build_approval_description(self, pending: PendingToolCall) -> str:
         """Best-effort, human-reviewable description of the pending action.

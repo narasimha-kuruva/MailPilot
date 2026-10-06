@@ -31,6 +31,7 @@ from mailpilot.intelligence.gemini_service import GeminiIntelligenceService
 from mailpilot.intelligence.service import IntelligenceService
 from mailpilot.llm.providers import LLMProviderError, build_chat_model, build_embedding_function
 from mailpilot.mcp.tools.registry import build_tools
+from mailpilot.observability.metrics import LLMUsageCallback, MetricsRegistry
 from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.rag.embeddings import EmbeddingFunction
 from mailpilot.rag.service import RAGService
@@ -53,8 +54,17 @@ def get_gmail_client() -> GmailClient:
 
 
 @lru_cache
+def get_metrics() -> MetricsRegistry:
+    settings = get_settings()
+    return MetricsRegistry(
+        input_usd_per_million_tokens=settings.llm_input_usd_per_million_tokens,
+        output_usd_per_million_tokens=settings.llm_output_usd_per_million_tokens,
+    )
+
+
+@lru_cache
 def get_audit_service() -> AuditService:
-    return InMemoryAuditService()
+    return InMemoryAuditService(metrics=get_metrics())
 
 
 @lru_cache
@@ -66,7 +76,7 @@ def get_approval_service() -> ApprovalService:
 def get_chat_model() -> BaseChatModel:
     """The configured provider's chat model (Gemini or local Ollama) -- see `mailpilot.llm`."""
     try:
-        return build_chat_model(get_settings())
+        return build_chat_model(get_settings(), callbacks=[LLMUsageCallback(get_metrics())])
     except LLMProviderError as exc:
         raise _unavailable(exc) from exc
 
@@ -119,6 +129,7 @@ def get_agent() -> Agent:
         approval_ttl_seconds=settings.approval_ttl_seconds,
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
         gmail_client=get_gmail_client(),
+        metrics=get_metrics(),
     )
 
 
@@ -128,3 +139,4 @@ ApprovalServiceDep = Annotated[ApprovalService, Depends(get_approval_service)]
 RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
 IntelligenceServiceDep = Annotated[IntelligenceService, Depends(get_intelligence_service)]
 AgentDep = Annotated[Agent, Depends(get_agent)]
+MetricsDep = Annotated[MetricsRegistry, Depends(get_metrics)]

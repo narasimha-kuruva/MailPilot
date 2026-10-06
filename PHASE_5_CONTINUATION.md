@@ -441,26 +441,24 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     `tests/safety/test_idempotency.py` (7) incl. two conversations
     approving the same draft (sequential and concurrent) -> one send.
 
-13. **Phase 5.7 Observability.** Add `mailpilot/observability/metrics.py`
-    with a dependency-free `MetricsRegistry` (counters: agent runs total/
-    succeeded/failed, tool calls total/failed, approvals requested/approved/
-    rejected/expired; plus average tool-call duration). Add
-    `duration_ms: float | None = None` to `AuditRecord`
-    (`schemas/audit.py`) and measure it around tool execution in
-    `agent/graph.py`'s `tools_node` (and in `resume()`'s approved-call path).
-    Wire an optional `metrics: MetricsRegistry | None` into
-    `InMemoryAuditService` so every `record()` call updates it — this
-    reuses the existing single choke point rather than scattering metrics
-    calls through `graph.py`. Add `GET /api/v1/metrics` returning a snapshot.
-    For LLM token usage: check `getattr(response, "usage_metadata", None)`
-    on `AIMessage` responses in `agent_node` (real `ChatGoogleGenerativeAI`
-    populates this; `FakeChatModel` won't, so tests degrade gracefully to
-    "no usage tracked" rather than erroring) and feed into the registry if
-    present. For cost estimation, add `gemini_input_price_per_1k_tokens` /
-    `gemini_output_price_per_1k_tokens` settings **defaulting to 0.0**
-    (cost estimation off unless the user fills in real current pricing —
-    do NOT hardcode a specific $ figure as fact, pricing changes and can't
-    be verified from within this environment).
+13. ✅ **DONE (2026-10-06)** -- Phase 5.7 observability.
+    `observability/metrics.py`: `MetricsRegistry` (lock-protected counters)
+    fed from three choke points: `InMemoryAuditService(metrics=...)` ->
+    `observe_audit()` (tool calls by outcome + avg duration, overall and per
+    tool; approvals requested/approved/rejected/expired; `__*__` records
+    counted as `run_events`); `LangGraphAgent(metrics=...)` ->
+    `record_run()` (outcome + duration; a run that raises counts FAILED);
+    and `LLMUsageCallback`, attached to the chat model itself via
+    `build_chat_model(settings, callbacks=...)` -- differs from the sketch
+    below (which read `usage_metadata` in `agent_node` only): the callback
+    also sees planning and the model calls inside tools, through any
+    wrapper. `AuditRecord.duration_ms` measured in `tools_node` and in the
+    approved path (`_execute_approved` now returns it). Cost: settings
+    `LLM_INPUT_USD_PER_MILLION_TOKENS` / `LLM_OUTPUT_USD_PER_MILLION_TOKENS`,
+    default 0 = estimate off (null). `GET /api/v1/metrics` ->
+    `schemas/metrics.MetricsSnapshot`; needs no LLM/Gmail config.
+    Tests: `tests/observability/test_metrics.py` (8). Live-checked with
+    Ollama: real token counts (4860 in / 347 out over 2 calls).
 
 14. **Phase 5.8 Evaluation framework.** Add
     `mailpilot/evaluation/scenarios.py`: a data-only list of scenario

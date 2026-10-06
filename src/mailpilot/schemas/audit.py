@@ -30,4 +30,7 @@ class AuditRecord(BaseModel):
     status: ToolCallStatus
     result_summary: str | None = None
     approval_status: ApprovalStatus = ApprovalStatus.NOT_REQUIRED
+    # Wall-clock time of the tool execution, retries included (Phase 5.7);
+    # None when nothing ran (held, skipped by a limit, rejected, run events).
+    duration_ms: float | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     gmail_retry_base_delay_seconds: float = 1.0  # 1s, 2s, 4s
     gmail_max_concurrent_fetches: int = 5  # message bodies fetched in parallel per search
 
+    # --- Observability (Phase 5.7) ---
+    # Per-token prices for the cost estimate in GET /api/v1/metrics. 0 (the
+    # default) turns the estimate off: prices change and differ by plan, so
+    # none are built in, and a local Ollama model costs nothing per token.
+    llm_input_usd_per_million_tokens: float = 0.0
+    llm_output_usd_per_million_tokens: float = 0.0
+
     @field_validator("require_approval_before_send")
     @classmethod
     def _approval_before_send_cannot_be_disabled(cls, value: bool) -> bool:

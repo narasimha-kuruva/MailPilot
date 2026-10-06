@@ -252,11 +252,13 @@ def build_agent_graph(
         for call in last_message.tool_calls:
             tool_call_count += 1
 
+            duration_ms: float | None = None
             if tool_call_count > limits.max_tool_calls:
                 status = ToolCallStatus.SKIPPED
                 content = f"Tool call limit ({limits.max_tool_calls} per run) reached; '{call['name']}' was not executed."
             else:
                 status = ToolCallStatus.SUCCESS
+                started = time.perf_counter()
                 try:
                     tool = tools[call["name"]]
                     args_model = tool.args_schema.model_validate(call["args"])
@@ -269,6 +271,7 @@ def build_agent_graph(
                 except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
                     status = ToolCallStatus.FAILURE
                     content = f"Error calling {call['name']}: {exc}"
+                duration_ms = (time.perf_counter() - started) * 1000
 
             await audit_service.record(
                 AuditRecord(
@@ -280,6 +283,7 @@ def build_agent_graph(
                     status=status,
                     result_summary=content[:500],
                     approval_status=ApprovalStatus.NOT_REQUIRED,
+                    duration_ms=duration_ms,
                 )
             )
             tool_messages.append(

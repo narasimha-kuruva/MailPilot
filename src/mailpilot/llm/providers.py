@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 
 from mailpilot.config import Settings
@@ -100,8 +101,13 @@ def _require_google_api_key(settings: Settings) -> str:
     return settings.google_api_key
 
 
-def build_chat_model(settings: Settings) -> BaseChatModel:
-    """The chat model the agent graph, planner, intelligence service and drafting all share."""
+def build_chat_model(settings: Settings, callbacks: list[BaseCallbackHandler] | None = None) -> BaseChatModel:
+    """The chat model the agent graph, planner, intelligence service and drafting all share.
+
+    `callbacks` are attached to the model itself, so they see every call made
+    through it, whatever wrapper (`bind_tools`, `with_structured_output`)
+    makes the call -- see `mailpilot.observability.metrics.LLMUsageCallback`.
+    """
     if settings.llm_provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -111,7 +117,10 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         # knows a daily quota from a rate limit and respects the run's
         # deadline. 1, not 0: the SDK treats 0 as "use my defaults".
         return ChatGoogleGenerativeAI(
-            model=settings.gemini_model, google_api_key=_require_google_api_key(settings), max_retries=1
+            model=settings.gemini_model,
+            google_api_key=_require_google_api_key(settings),
+            max_retries=1,
+            callbacks=callbacks,
         )
 
     if settings.llm_provider == "ollama":
@@ -124,7 +133,10 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         # live: done_reason=length, empty reply). The models themselves
         # support far more; OLLAMA_NUM_CTX sets what we actually ask for.
         return ChatOllama(
-            model=settings.ollama_model, base_url=settings.ollama_base_url, num_ctx=settings.ollama_num_ctx
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            num_ctx=settings.ollama_num_ctx,
+            callbacks=callbacks,
         )
 
     raise LLMProviderError(f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. Use 'gemini' or 'ollama'.")
