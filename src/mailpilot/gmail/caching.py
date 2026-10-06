@@ -10,7 +10,9 @@ default 30):
   and a search's results warm it, so search-then-read costs one fetch.
 - Searches themselves always go to Gmail: "what's new" must be current.
 - Any write -- a label, a draft, a send -- clears the cache, so nothing
-  stale outlives a change MailPilot made.
+  stale outlives a change MailPilot made. A read that was already under
+  way when the cache was cleared isn't stored either: it may have been
+  answered before the write (one turn's tool calls run concurrently).
 - `get_draft` is never cached: an approval request must show the draft
   exactly as it is now.
 
@@ -41,6 +43,8 @@ class CachingGmailClient(GmailClient):
         self._ttl = ttl_seconds
         self._clock = clock
         self._entries: dict[tuple[str, str], tuple[float, BaseModel]] = {}
+        # Bumped by every clear(); a read stores its result only if none happened while it ran.
+        self._generation = 0
 
     def _get(self, kind: str, key: str, model: type[M]) -> M | None:
         entry = self._entries.get((kind, key))
@@ -52,7 +56,9 @@ class CachingGmailClient(GmailClient):
             return None
         return value.model_copy(deep=True)  # type: ignore[return-value]
 
-    def _put(self, kind: str, key: str, value: BaseModel) -> None:
+    def _put(self, kind: str, key: str, value: BaseModel, generation: int) -> None:
+        if generation != self._generation:
+            return
         if len(self._entries) >= _MAX_ENTRIES:
             now = self._clock()
             self._entries = {k: v for k, v in self._entries.items() if now - v[0] < self._ttl}
@@ -62,29 +68,33 @@ class CachingGmailClient(GmailClient):
 
     def clear(self) -> None:
         self._entries.clear()
+        self._generation += 1
 
     # --- reads -----------------------------------------------------------------
 
     async def search_messages(self, query: str, max_results: int = 25) -> list[EmailMessage]:
+        generation = self._generation
         messages = await self._inner.search_messages(query, max_results)
         for message in messages:
-            self._put("message", message.message_id, message)
+            self._put("message", message.message_id, message, generation)
         return messages
 
     async def get_message(self, message_id: str) -> EmailMessage:
         cached = self._get("message", message_id, EmailMessage)
         if cached is not None:
             return cached
+        generation = self._generation
         message = await self._inner.get_message(message_id)
-        self._put("message", message_id, message)
+        self._put("message", message_id, message, generation)
         return message
 
     async def get_thread(self, thread_id: str) -> EmailThread:
         cached = self._get("thread", thread_id, EmailThread)
         if cached is not None:
             return cached
+        generation = self._generation
         thread = await self._inner.get_thread(thread_id)
-        self._put("thread", thread_id, thread)
+        self._put("thread", thread_id, thread, generation)
         return thread
 
     async def list_labels(self) -> list[Label]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from mailpilot.config import Settings
@@ -95,3 +97,32 @@ async def test_callers_get_copies() -> None:
 def test_the_cache_is_on_by_default_and_can_be_turned_off() -> None:
     assert Settings(_env_file=None).gmail_cache_seconds == 30
     assert Settings(_env_file=None, gmail_cache_seconds=0).gmail_cache_seconds == 0
+
+
+class _SlowReads(FakeGmailClient):
+    """Gmail answers a read, but the answer arrives only once `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def get_message(self, message_id: str):
+        message = await super().get_message(message_id)
+        await self.release.wait()
+        return message
+
+
+@pytest.mark.asyncio
+async def test_a_read_still_under_way_when_a_write_lands_is_not_cached() -> None:
+    """One turn's tool calls run together: [read_email(m), apply_label(m, X)]."""
+    inner = _SlowReads()
+    cache = CachingGmailClient(inner, ttl_seconds=30)
+
+    read = asyncio.create_task(cache.get_message("msg-1"))
+    await asyncio.sleep(0)  # the read is under way, its answer taken before the label
+    await cache.apply_label("msg-1", "STARRED")
+    inner.release.set()
+    await read
+    await cache.get_message("msg-1")
+
+    assert _count(inner, "get_message") == 2  # fetched again: the older answer wasn't kept
