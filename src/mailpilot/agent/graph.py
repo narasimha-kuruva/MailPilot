@@ -164,15 +164,19 @@ def serialize_result(result: Any) -> str:
 def fence_tool_output(content: str, status: ToolCallStatus) -> str:
     """What the model reads back for a tool call (Phase 5.2).
 
-    A successful result can carry email text -- a body from `read_email`, a
-    thread, a subject line -- that someone other than the user wrote, so it
-    is fenced as untrusted data, the same way the intelligence and drafting
-    prompts fence what they insert. Error, skip, and hold messages are
-    MailPilot's own text and stay as they are.
+    Anything a tool produced is fenced as untrusted data, the same way the
+    intelligence and drafting prompts fence what they insert. A result can
+    carry email text -- a body from `read_email`, a thread, a subject line --
+    that someone other than the user wrote. So can an error: its message
+    interpolates the exception, and e.g. LangChain's structured-output parser
+    quotes the inner model's raw output (written after reading the email) in
+    its error. Only SKIPPED messages -- held for approval, over a limit,
+    rejected, a suppressed duplicate -- are MailPilot's own text throughout,
+    and stay as they are.
     """
-    if status is ToolCallStatus.SUCCESS:
-        return wrap_untrusted(TOOL_RESULT_LABEL, content)
-    return content
+    if status is ToolCallStatus.SKIPPED:
+        return content
+    return wrap_untrusted(TOOL_RESULT_LABEL, content)
 
 
 def _truncate(text: str, max_chars: int) -> str:
