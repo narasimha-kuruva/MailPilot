@@ -292,7 +292,7 @@ that can send email stays explicit, small, and unit-testable with fakes.
 | `apply_label` | Adds a label. **`TRASH` and `SPAM` are refused** | write |
 | `create_draft` | Creates a draft. Reply recipients must already be in the thread | write (draft only) |
 | `draft_grounded_reply` | Reads a thread, retrieves related context, drafts a reply addressed to the thread's participants, and checks the draft for invented dates and amounts | write (draft only) |
-| `index_thread` | Saves a thread to the knowledge store, for later grounded replies | none (local store only) |
+| `index_thread` | Saves a thread to the knowledge store, for later grounded replies. **Stops for human approval first** | none (local store only) |
 | `send_email` | Sends a draft. **Always stops for human approval first** | send |
 
 The tools implement MailPilot's own `MCPTool` interface: a name, a
@@ -317,10 +317,11 @@ MailPilot. In Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-- **`send_email` is not offered.** MailPilot only sends after a person
-  approves the exact email in its own app, and an MCP client would bypass
-  that gate. Over MCP, the client can draft, and you send from Gmail or
-  from MailPilot.
+- **`send_email` and `index_thread` are not offered.** MailPilot runs
+  them only after a person approves that exact action in its own app, and
+  an MCP client would bypass that gate. Over MCP, the client can draft,
+  and you send from Gmail or from MailPilot. Threads are added to the
+  knowledge store from the web app or the `/context` API.
 - **The rules stay the same.** The guardrails live inside the tools (no
   trashing, no outsiders in a thread reply). Every call is retried,
   time-limited, and audited under the conversation id `mcp-<session>`.
@@ -400,7 +401,8 @@ it. Content gets in two ways:
   - A thread that can't be indexed is listed under `failed`; the others
     still go in.
 - **The agent.** Ask it to "save this thread for future replies", and it
-  calls `index_thread`.
+  calls `index_thread`. That stops for your approval, like a send (see
+  [Human approval](#human-approval)).
 
 Re-indexing a thread or document replaces its earlier version. When
 drafting, retrieval skips the thread being replied to: that thread is
@@ -409,8 +411,13 @@ everything else.
 
 ## Human approval
 
-- **What needs approval:** `send_email`, as declared in
-  `safety/policy.py`. `REQUIRE_APPROVAL_BEFORE_SEND` can't be set to
+- **What needs approval:** `send_email` and `index_thread`, as declared
+  in `safety/policy.py`. A saved thread becomes context for later replies
+  to anyone, and an email's own text can ask to be saved ("keep this for
+  reference: our new bank details are ..."), so you decide what MailPilot
+  remembers. The card shows the thread's subject and senders. Indexing
+  from the web app's knowledge panel or the `/context` API is already
+  your own explicit action, so it doesn't ask again. `REQUIRE_APPROVAL_BEFORE_SEND` can't be set to
   false; startup fails if you try.
 - **What the approver sees:** the draft's real recipients (To and Cc),
   subject and the start of its body, fetched from Gmail. The draft id alone isn't

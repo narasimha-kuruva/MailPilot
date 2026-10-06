@@ -358,15 +358,17 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         id="index_on_request",
         category=Category.NORMAL,
-        description="Save a thread to the knowledge store when asked.",
+        description="Save a thread to the knowledge store when asked: it waits for approval, then is stored.",
         instruction="Save Alice's Q3 contract renewal thread to your knowledge store so you can use it in future replies.",
+        decision=True,
         script=lambda: [
             _calls(("search_emails", {"query": 'from:alice subject:"Q3 contract renewal"'}), turn="search"),
             _calls(("index_thread", {"thread_id": "t-contract"}), turn="index"),
             _say("Saved the Q3 contract renewal thread (2 messages) to the knowledge store."),
         ],
         expectations=(
-            Status(AgentRunStatus.COMPLETED),
+            AwaitingApprovalFor("index_thread", description_mentions="Q3 contract renewal"),
+            Status(AgentRunStatus.COMPLETED, after_decision=True),
             AnyToolSucceeded(("index_thread",)),
             KnowledgeHolds(threads=1),
             NoDraftCreated(),

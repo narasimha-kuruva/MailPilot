@@ -192,7 +192,11 @@ function renderMessage(message, index) {
 
   if (message.kind === "approval") {
     const node = el("div", "message approval");
-    node.append(el("h3", null, message.toolName === "send_email" ? "Approve sending this email?" : `Approve ${message.toolName}?`));
+    const titles = {
+      send_email: "Approve sending this email?",
+      index_thread: "Approve saving this thread to the knowledge store?",
+    };
+    node.append(el("h3", null, titles[message.toolName] || `Approve ${message.toolName}?`));
     node.append(el("pre", null, message.description));
     if (message.outcome) {
       const labels = {

@@ -36,6 +36,7 @@ from mailpilot.prompts import AGENT_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT
 from mailpilot.resilience import with_retries, with_timeout
 from mailpilot.safety.approval import ApprovalService
 from mailpilot.safety.idempotency import IdempotencyGuard, idempotency_key
+from mailpilot.safety.policy import runs_once
 from mailpilot.schemas.agent import (
     AgentPlan,
     AgentRequest,
@@ -343,7 +344,8 @@ class LangGraphAgent(Agent):
         return state
 
     async def _execute_approved(self, pending: PendingToolCall) -> tuple[str, ToolCallStatus, float | None]:
-        """Run an approved action once, unless that same action already ran or is running.
+        """Run an approved action. One that can't be undone (`runs_once`) is skipped
+        if that same action already ran or is running.
 
         Returns the result text, its status, and how long it ran (None if it didn't).
         """
@@ -355,8 +357,8 @@ class LangGraphAgent(Agent):
         except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
             return f"Error calling {pending.tool_name}: {exc}", ToolCallStatus.FAILURE, None
 
-        key = idempotency_key(pending.tool_name, args)
-        if not self._idempotency.try_begin(key):
+        key = idempotency_key(pending.tool_name, args) if runs_once(pending.tool_name) else None
+        if key is not None and not self._idempotency.try_begin(key):
             if self._idempotency.completed_result(key) is None:
                 reason = "the same action is still running from an earlier approval"
             else:
@@ -374,7 +376,8 @@ class LangGraphAgent(Agent):
         # would let a second approval send the same draft concurrently.
         started = time.perf_counter()
         task = asyncio.ensure_future(tool.run(**args))
-        task.add_done_callback(lambda done: self._settle(key, done))
+        if key is not None:
+            task.add_done_callback(lambda done: self._settle(key, done))
         try:
             # Bounded by the same tool timeout as every other tool call, but
             # never auto-retried -- see mailpilot.gmail.google_client for why
@@ -429,6 +432,23 @@ class LangGraphAgent(Agent):
                     logger.warning(
                         "Could not fetch draft for approval preview",
                         extra={"extra_fields": {"draft_id": draft_id, "error": str(exc)}},
+                    )
+
+        if pending.tool_name == "index_thread" and self._gmail_client is not None:
+            thread_id = pending.tool_args.get("thread_id")
+            if thread_id:
+                try:
+                    thread = await self._gmail_client.get_thread(thread_id)
+                    senders = ", ".join(dict.fromkeys(message.sender.email for message in thread.messages))
+                    return (
+                        f"Save to the knowledge store: {thread.subject or '(no subject)'}\n"
+                        f"{len(thread.messages)} message(s) from: {senders or '(nobody)'}\n\n"
+                        "Its text will be used as context when drafting later replies, to anyone."
+                    )
+                except Exception as exc:  # noqa: BLE001 - fall back to the generic description below
+                    logger.warning(
+                        "Could not fetch thread for approval preview",
+                        extra={"extra_fields": {"thread_id": thread_id, "error": str(exc)}},
                     )
 
         return f"Approve '{pending.tool_name}' with arguments {pending.tool_args}?"

@@ -22,7 +22,8 @@ class IndexThreadTool(MCPTool):
     description = (
         "Save a thread to MailPilot's knowledge store, so later grounded replies "
         "(draft_grounded_reply) can draw on it as context. Stores the thread's text locally; "
-        "it doesn't change the mailbox. Only index threads the user wants remembered."
+        "it doesn't change the mailbox. Only index threads the user asked you to remember; "
+        "the user is shown the thread and must approve before anything is stored."
     )
     args_schema = IndexThreadArgs
 

@@ -7,17 +7,26 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from langchain_core.messages import AIMessage
+
+from mailpilot.agent.graph import build_agent_graph
+from mailpilot.agent.langgraph_agent import LangGraphAgent
+from mailpilot.agent.pending import memory_checkpointer
 from mailpilot.agent.reply_drafting import exclude_thread
 from mailpilot.api.deps import get_gmail_client, get_rag_service
+from mailpilot.audit.in_memory_audit import InMemoryAuditService
 from mailpilot.evaluation.mailbox import InMemoryGmailClient
 from mailpilot.evaluation.scenarios import OWN_EMAIL, USER_LABELS, default_mailbox
 from mailpilot.main import create_app
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.rag.indexing import index_threads, thread_ids_for_query
+from mailpilot.safety.in_memory_approval import InMemoryApprovalService
+from mailpilot.schemas.agent import AgentRequest, AgentRunStatus
+from mailpilot.schemas.audit import ToolCallStatus
 from mailpilot.schemas.email import EmailAddress, EmailMessage, EmailThread
 from tests.conftest import local_client
-from tests.fakes import FakeEmbeddingFunction
+from tests.fakes import FakeChatModel, FakeEmbeddingFunction
 
 
 def _store(tmp_path: Path) -> ChromaRAGService:
@@ -112,6 +121,46 @@ async def test_the_agent_tool_indexes_a_thread(tmp_path: Path) -> None:
 
     assert (result.thread_id, result.messages, result.chunks) == ("t-contract", 2, 2)
     assert (await store.stats()).threads == 1
+
+
+@pytest.mark.asyncio
+async def test_the_agent_saves_a_thread_only_after_the_user_approves(tmp_path: Path) -> None:
+    """Email text can ask to be remembered; the person decides, not the mail."""
+    store, mailbox = _store(tmp_path), _mailbox()
+    tools = build_tools(mailbox, rag_service=store)
+    audit = InMemoryAuditService()
+    model = FakeChatModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "index_thread", "args": {"thread_id": "t-contract"}, "id": "i1"}]),
+            AIMessage(content="Saved."),
+            AIMessage(content="", tool_calls=[{"name": "index_thread", "args": {"thread_id": "t-contract"}, "id": "i2"}]),
+            AIMessage(content="Refreshed."),
+        ]
+    )
+    agent = LangGraphAgent(
+        build_agent_graph(model, tools, audit, checkpointer=memory_checkpointer()),
+        tools,
+        InMemoryApprovalService(),
+        audit,
+        gmail_client=mailbox,
+    )
+
+    state = await agent.run(AgentRequest(instruction="save the contract thread", conversation_id="c1"))
+
+    assert state.status is AgentRunStatus.AWAITING_APPROVAL
+    assert state.pending_approval.tool_name == "index_thread"
+    assert "Q3 contract renewal" in state.pending_approval.description
+    assert "alice@" in state.pending_approval.description
+    assert (await store.stats()).threads == 0  # nothing stored before the decision
+
+    assert (await agent.resume("c1", approved=True, approval_id="i1")).final_response == "Saved."
+    assert (await store.stats()).threads == 1
+
+    # Saving it again later refreshes it: unlike a send, it isn't held to once.
+    await agent.run(AgentRequest(instruction="save it again, it has new replies", conversation_id="c1"))
+    await agent.resume("c1", approved=True, approval_id="i2")
+    statuses = [r.status for r in await audit.get_history("c1") if r.tool_name == "index_thread"]
+    assert statuses.count(ToolCallStatus.SUCCESS) == 2
 
 
 # --- The API -------------------------------------------------------------------------
