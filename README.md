@@ -603,7 +603,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 345 unit tests, no network
+pytest                                                       # 362 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
