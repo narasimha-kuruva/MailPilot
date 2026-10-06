@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -97,6 +98,25 @@ async def test_usage_callback_counts_every_call_through_any_wrapper() -> None:
 
     llm = metrics.snapshot().llm
     assert (llm.calls, llm.input_tokens, llm.output_tokens, llm.failed) == (2, 240, 60, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_by_a_timeout_still_counts_as_unfinished() -> None:
+    """LangChain fires neither on_llm_end nor on_llm_error for a cancelled call."""
+
+    class SlowModel(GenericFakeChatModel):
+        async def _agenerate(self, *args, **kwargs):
+            await asyncio.sleep(1)
+            return await super()._agenerate(*args, **kwargs)
+
+    metrics = MetricsRegistry()
+    model = SlowModel(messages=iter([AIMessage(content="late")]), callbacks=[LLMUsageCallback(metrics)])
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(model.ainvoke("hello"), timeout=0.05)
+
+    llm = metrics.snapshot().llm
+    assert (llm.calls, llm.completed, llm.failed, llm.unfinished) == (1, 0, 0, 1)
 
 
 @pytest.mark.asyncio

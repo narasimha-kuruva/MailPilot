@@ -112,7 +112,8 @@ class MetricsRegistry:
         self._tools: defaultdict[str, _ToolStats] = defaultdict(_ToolStats)
         self._approvals: Counter[str] = Counter()
         self._events: Counter[str] = Counter()
-        self._llm_calls = 0
+        self._llm_started = 0
+        self._llm_completed = 0
         self._llm_failures = 0
         self._input_tokens = 0
         self._output_tokens = 0
@@ -135,9 +136,14 @@ class MetricsRegistry:
             self._runs[status] += 1
             self._run_duration_ms += duration_ms
 
-    def record_llm_call(self, input_tokens: int, output_tokens: int) -> None:
+    def record_llm_start(self) -> None:
         with self._lock:
-            self._llm_calls += 1
+            self._llm_started += 1
+
+    def record_llm_call(self, input_tokens: int, output_tokens: int) -> None:
+        """A model call that completed, with the tokens it used."""
+        with self._lock:
+            self._llm_completed += 1
             self._input_tokens += input_tokens
             self._output_tokens += output_tokens
 
@@ -151,6 +157,10 @@ class MetricsRegistry:
             for stats in self._tools.values():
                 totals.merge(stats)
             run_count = sum(self._runs.values())
+            # A call that started but never ended was cancelled -- almost always
+            # by a timeout, which LangChain reports neither as an end nor as an
+            # error -- or is still in flight.
+            llm_calls = max(self._llm_started, self._llm_completed + self._llm_failures)
             if self._input_price or self._output_price:
                 cost: float | None = round(
                     (self._input_tokens * self._input_price + self._output_tokens * self._output_price) / 1_000_000,
@@ -179,8 +189,10 @@ class MetricsRegistry:
                 ),
                 run_events=dict(self._events),
                 llm=LLMMetrics(
-                    calls=self._llm_calls,
+                    calls=llm_calls,
+                    completed=self._llm_completed,
                     failed=self._llm_failures,
+                    unfinished=llm_calls - self._llm_completed - self._llm_failures,
                     input_tokens=self._input_tokens,
                     output_tokens=self._output_tokens,
                     estimated_cost_usd=cost,
@@ -194,13 +206,20 @@ class LLMUsageCallback(BaseCallbackHandler):
     Attach it to the model (`callbacks=[...]` at construction): LangChain
     then runs it for every call, including through `bind_tools` and
     `with_structured_output`. Models that don't report usage still count as
-    a call, with zero tokens.
+    a call, with zero tokens. Every start is counted, because a call cancelled
+    by a timeout never reaches `on_llm_end` or `on_llm_error`.
     """
 
     run_inline = True  # update the counters directly instead of in an executor thread
 
     def __init__(self, metrics: MetricsRegistry) -> None:
         self._metrics = metrics
+
+    def on_chat_model_start(self, serialized: dict[str, Any], messages: list[list[Any]], **kwargs: Any) -> None:
+        self._metrics.record_llm_start()
+
+    def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
+        self._metrics.record_llm_start()
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         input_tokens = output_tokens = 0

@@ -389,7 +389,8 @@ memory.
 - **Metrics** (`GET /api/v1/metrics`): runs by outcome and average
   duration; tool calls by outcome and average duration, overall and per
   tool; approvals requested, approved, rejected and expired; run events;
-  and model calls, failures, and input and output tokens. Token counting
+  and model calls (completed, failed, and unfinished, meaning cancelled by
+  a timeout or still running) with input and output tokens. Token counting
   hooks into the model itself, so it covers planning and the model calls
   made inside tools as well as the agent loop. An estimated cost appears
   only if you set `LLM_INPUT_USD_PER_MILLION_TOKENS` and

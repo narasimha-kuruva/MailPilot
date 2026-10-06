@@ -42,7 +42,11 @@ class LLMMetrics(BaseModel):
     """Every chat-model call, including retries and the calls made inside tools."""
 
     calls: int = 0
-    failed: int = 0
+    completed: int = 0
+    failed: int = Field(default=0, description="Raised an error.")
+    unfinished: int = Field(
+        default=0, description="Started but never ended: cancelled (usually by a timeout) or still running."
+    )
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float | None = Field(
