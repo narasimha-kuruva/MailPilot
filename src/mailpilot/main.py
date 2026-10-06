@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from mailpilot.api.middleware import request_context
 from mailpilot.api.routes.agent import router as agent_router
@@ -17,6 +20,8 @@ from mailpilot.config import get_settings
 from mailpilot.logging_config import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+UI_DIR = Path(__file__).parent / "ui"
 
 
 @asynccontextmanager
@@ -53,6 +58,14 @@ def create_app() -> FastAPI:
     app.include_router(agent_router, prefix="/api/v1", dependencies=protected)
     app.include_router(metrics_router, prefix="/api/v1", dependencies=protected)
     app.include_router(context_router, prefix="/api/v1", dependencies=protected)
+
+    # The web UI: static files that call the API above (which does the access
+    # checks). Served with a strict CSP -- see mailpilot.api.middleware.
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/ui/")
 
     return app
 

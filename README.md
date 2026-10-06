@@ -59,18 +59,32 @@ copy .env.example .env          # cp on macOS/Linux
 
    If you skip this step, the consent window opens the first time a
    request touches Gmail.
-3. **Run it:** `python -m mailpilot.main`, then open
-   <http://127.0.0.1:8000/docs>.
+3. **Run it:** `python -m mailpilot.main`, then open the web app at
+   <http://127.0.0.1:8000/> (or the API docs at `/docs`).
 
 `/health`, `/metrics` and `/docs` work with no model and no Gmail
 configured. Only the agent endpoints need them.
 
 ## Talking to the agent
 
-MailPilot's interface is an **HTTP API** (FastAPI). There is no chat
-window or command-line client. The quickest way to use it by hand is the
-interactive Swagger UI at `/docs`, which can call every endpoint from the
-browser. Any HTTP client works too.
+**The web app.** Open <http://127.0.0.1:8000/> while the server runs. It
+gives you:
+
+- a chat with the agent;
+- an approval card for every send, showing the real recipients and text,
+  with **Approve** and **Reject** buttons;
+- an activity panel listing every tool call in the conversation;
+- a knowledge panel to index threads by Gmail search.
+
+The conversation survives a page reload within the tab. If the server has
+an API key, the app asks for it once per tab. The app is three static files
+(`src/mailpilot/ui/`) with no build step and nothing loaded from other
+sites. Email and model text is only ever displayed as text, never inserted
+as HTML, and the pages carry a strict Content-Security-Policy.
+
+**The HTTP API.** Everything the web app does goes through the API below,
+so any HTTP client can do the same. `/docs` (Swagger UI) lets you try every
+endpoint from the browser.
 
 | Endpoint | What it does |
 |---|---|
@@ -482,7 +496,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 305 unit tests, no network
+pytest                                                       # 315 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 

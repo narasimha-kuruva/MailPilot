@@ -32,6 +32,18 @@ logger = get_logger(__name__)
 REQUEST_ID_HEADER = "X-Request-ID"
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
+# The web UI shows text that came from emails. It never inserts it as HTML,
+# and this policy is the second line: only the UI's own script and styles may
+# run, it may only talk to this server, and no other site may frame it.
+UI_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
 
 async def request_context(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     incoming = request.headers.get(REQUEST_ID_HEADER, "")
@@ -68,4 +80,6 @@ async def request_context(request: Request, call_next: Callable[[Request], Await
     finally:
         request_id_var.reset(token)
     response.headers[REQUEST_ID_HEADER] = request_id
+    if request.url.path.startswith("/ui"):
+        response.headers.update(UI_SECURITY_HEADERS)
     return response

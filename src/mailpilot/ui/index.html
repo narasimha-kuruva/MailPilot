@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MailPilot</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">MailPilot</div>
+    <div id="status" class="status" role="status">Connecting…</div>
+    <button id="new-conversation" type="button" class="secondary">New conversation</button>
+  </header>
+
+  <main class="layout">
+    <section class="chat" aria-label="Conversation">
+      <div id="messages" class="messages" aria-live="polite">
+        <div id="empty" class="empty">
+          <h1>What should I do with your mail?</h1>
+          <p>Try one of these, or write your own:</p>
+          <div class="suggestions">
+            <button type="button" class="suggestion">Which of my unread emails are urgent?</button>
+            <button type="button" class="suggestion">Summarize my most recent email.</button>
+            <button type="button" class="suggestion">Find emails from clients this week and draft replies. Don't send anything.</button>
+          </div>
+          <p class="hint">Nothing is ever sent without your approval: you'll see the recipients and the text first.</p>
+        </div>
+      </div>
+      <div id="working" class="working" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Working… <span id="elapsed">0s</span></span>
+      </div>
+      <form id="composer" class="composer">
+        <textarea id="instruction" rows="2" maxlength="10000" required
+          placeholder="Ask MailPilot… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+    </section>
+
+    <aside class="side">
+      <details id="activity-panel" open>
+        <summary>Activity</summary>
+        <p class="panel-hint">Every tool call in this conversation.</p>
+        <ol id="activity" class="activity"></ol>
+      </details>
+      <details id="knowledge-panel">
+        <summary>Knowledge</summary>
+        <p class="panel-hint">What grounded replies can draw on. Only what you index is stored.</p>
+        <p id="knowledge-stats" class="stats">…</p>
+        <form id="index-form" class="index-form">
+          <label for="index-query">Index threads matching a Gmail search</label>
+          <input id="index-query" type="text" placeholder="from:alice newer_than:90d" required>
+          <div class="row">
+            <label for="index-max">Up to</label>
+            <input id="index-max" type="number" min="1" max="50" value="10">
+            <span>threads</span>
+            <button type="submit" class="secondary">Index</button>
+          </div>
+        </form>
+        <p id="index-result" class="panel-hint"></p>
+      </details>
+    </aside>
+  </main>
+
+  <dialog id="key-dialog">
+    <form id="key-form" method="dialog">
+      <h2>API key needed</h2>
+      <p>This MailPilot server requires its API key (<code>MAILPILOT_API_KEY</code>). It's kept for this browser tab only.</p>
+      <input id="key-input" type="password" autocomplete="off" minlength="16" required>
+      <div class="row end">
+        <button type="button" id="key-cancel" class="secondary">Cancel</button>
+        <button type="submit" value="ok">Use key</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
