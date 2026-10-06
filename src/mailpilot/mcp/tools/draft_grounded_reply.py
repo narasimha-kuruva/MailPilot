@@ -52,11 +52,13 @@ class DraftGroundedReplyTool(MCPTool):
         chat_model: Any,
         max_context_chars: int = 6000,
         own_email: str | None = None,
+        top_k: int = 5,
     ) -> None:
         self._gmail_client = gmail_client
         self._rag_service = rag_service
         self._chat_model = chat_model
         self._max_context_chars = max_context_chars
+        self._top_k = top_k  # chunks retrieved before packing (Settings.rag_top_k)
         # The user's own address, if configured (Settings.gmail_user_email),
         # so a reply-all doesn't include themselves.
         self._own_email = own_email
@@ -72,6 +74,7 @@ class DraftGroundedReplyTool(MCPTool):
             intent=args.intent,
             chat_model=self._chat_model,
             rag_service=self._rag_service,
+            top_k=self._top_k,
             max_context_chars=self._max_context_chars,
         )
 

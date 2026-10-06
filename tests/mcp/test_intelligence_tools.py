@@ -11,6 +11,7 @@ from mailpilot.mcp.tools.extract_tasks import ExtractTasksTool
 from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.mcp.tools.summarize_thread import SummarizeThreadTool
 from mailpilot.rag.chroma_service import ChromaRAGService
+from mailpilot.rag.service import RAGService
 from mailpilot.schemas.intelligence import (
     EmailCategory,
     EmailClassification,
@@ -19,7 +20,7 @@ from mailpilot.schemas.intelligence import (
     TaskExtractionResult,
     ThreadSummary,
 )
-from mailpilot.schemas.email import EmailAddress, EmailMessage
+from mailpilot.schemas.email import EmailAddress, EmailMessage, EmailThread
 from tests.fakes import FakeChatModel, FakeEmbeddingFunction, FakeGmailClient
 
 
@@ -86,6 +87,41 @@ async def test_draft_grounded_reply_tool_creates_a_draft(tmp_path: Path) -> None
     # The fixture thread is alice -> me, so reply-all minus self is just alice.
     assert [a.email for a in draft_arg.to] == ["alice@example.com"]
     assert draft_arg.cc == []
+
+
+class _RecordingRAGService(RAGService):
+    """Records the retrieval size it was asked for; holds no context."""
+
+    def __init__(self) -> None:
+        self.top_k: int | None = None
+
+    async def ingest_thread(self, thread: EmailThread) -> None:
+        raise NotImplementedError
+
+    async def ingest_document(self, document_id: str, text: str, metadata: dict) -> None:
+        raise NotImplementedError
+
+    async def query(self, query: str, top_k: int = 5, where: dict | None = None) -> list:
+        self.top_k = top_k
+        return []
+
+
+@pytest.mark.asyncio
+async def test_draft_grounded_reply_retrieves_the_configured_number_of_chunks() -> None:
+    """RAG_TOP_K reaches retrieval through build_tools (it used to be ignored)."""
+    rag_service = _RecordingRAGService()
+    chat_model = FakeChatModel([GroundedDraft(subject="Re: Project update", body_text="Thanks!")])
+    tools = build_tools(
+        FakeGmailClient(),
+        intelligence_service=GeminiIntelligenceService(chat_model),
+        rag_service=rag_service,
+        chat_model=chat_model,
+        top_k=2,
+    )
+
+    await tools["draft_grounded_reply"].run(thread_id="thread-1", intent="thank them")
+
+    assert rag_service.top_k == 2
 
 
 @pytest.mark.asyncio
