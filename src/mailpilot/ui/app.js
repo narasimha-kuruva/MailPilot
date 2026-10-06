@@ -200,7 +200,7 @@ function renderMessage(message, index) {
         rejected: "Rejected — not sent",
         expired: "Expired — not sent",
         withdrawn: "Withdrawn by your next instruction — not sent",
-        gone: "No longer pending (the server may have restarted) — not sent",
+        gone: "No longer waiting for a decision — see Activity for what happened",
       };
       node.append(el("div", `outcome ${message.outcome}`, labels[message.outcome] || message.outcome));
     } else {
@@ -240,6 +240,8 @@ let busyTimer = null;
 function setBusy(busy) {
   $("send").disabled = busy;
   $("instruction").disabled = busy;
+  // A reply that arrives after the chat was replaced would land in the new one.
+  $("new-conversation").disabled = busy;
   document.querySelectorAll(".approval button, .suggestion").forEach((b) => (b.disabled = busy));
   $("working").hidden = !busy;
   clearInterval(busyTimer);
