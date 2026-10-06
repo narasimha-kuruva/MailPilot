@@ -91,11 +91,13 @@ class Settings(BaseSettings):
     agent_max_llm_retries: int = 3  # per model call, on transient 503/429/timeouts
     agent_llm_retry_base_delay_seconds: float = 2.0
     agent_llm_timeout_seconds: float = 60.0  # raise for slow local (CPU-only) models
+    agent_max_parallel_tool_calls: int = Field(default=4, ge=1)  # one model turn's tool calls, run together
 
     # --- Reliability (Phase 5) ---
     gmail_max_retries: int = 3  # per request; rate-limit 403/429s are retried with backoff
     gmail_retry_base_delay_seconds: float = 1.0  # 1s, 2s, 4s
     gmail_max_concurrent_fetches: int = 5  # message bodies fetched in parallel per search
+    gmail_cache_seconds: float = Field(default=30.0, ge=0)  # message/thread read cache; 0 turns it off
 
     # --- Persistence ---
     # sqlite (default): conversations, pending approvals, the audit trail and

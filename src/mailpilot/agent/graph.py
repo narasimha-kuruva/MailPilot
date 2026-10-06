@@ -34,6 +34,7 @@ clear status and audit entry instead of an unhandled exception.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field, fields
@@ -81,6 +82,7 @@ class AgentLimits:
     max_llm_retries: int = 3
     llm_retry_base_delay_seconds: float = 2.0
     llm_timeout_seconds: float = 60.0  # raise for slow local (CPU-only) models
+    max_parallel_tool_calls: int = 4  # tool calls of one model turn run together, at most this many at once
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AgentLimits":
@@ -242,34 +244,43 @@ def build_agent_graph(
         return {"messages": [response], "step_count": step_count}
 
     async def tools_node(state: GraphState) -> dict[str, Any]:
-        last_message = state["messages"][-1]
-        tool_messages: list[ToolMessage] = []
-        tool_call_count = state["tool_call_count"]
+        calls = state["messages"][-1].tool_calls
+        # Which calls may run is decided up front, in call order, so the
+        # tool-call limit cuts off the same calls however the concurrent
+        # ones finish.
+        allowed = [state["tool_call_count"] + index < limits.max_tool_calls for index in range(len(calls))]
+        semaphore = asyncio.Semaphore(limits.max_parallel_tool_calls)
 
-        for call in last_message.tool_calls:
-            tool_call_count += 1
-
-            duration_ms: float | None = None
-            if tool_call_count > limits.max_tool_calls:
-                status = ToolCallStatus.SKIPPED
-                content = f"Tool call limit ({limits.max_tool_calls} per run) reached; '{call['name']}' was not executed."
-            else:
-                status = ToolCallStatus.SUCCESS
+        async def execute(call: dict[str, Any], may_run: bool) -> tuple[str, ToolCallStatus, float | None]:
+            if not may_run:
+                return (
+                    f"Tool call limit ({limits.max_tool_calls} per run) reached; '{call['name']}' was not executed.",
+                    ToolCallStatus.SKIPPED,
+                    None,
+                )
+            async with semaphore:
                 started = time.perf_counter()
                 try:
                     tool = tools[call["name"]]
-                    args_model = tool.args_schema.model_validate(call["args"])
+                    args = tool.args_schema.model_validate(call["args"]).model_dump()
 
-                    async def _call(_tool: MCPTool = tool, _args: dict = args_model.model_dump()) -> Any:
-                        return await with_timeout(lambda: _tool.run(**_args), limits.tool_timeout_seconds)
+                    async def attempt() -> Any:
+                        return await with_timeout(lambda: tool.run(**args), limits.tool_timeout_seconds)
 
-                    result = await with_retries(_call, max_retries=limits.max_tool_retries, **sleep_kwargs)
+                    result = await with_retries(attempt, max_retries=limits.max_tool_retries, **sleep_kwargs)
                     content = truncate_output(serialize_result(result), limits.max_output_chars)
+                    status = ToolCallStatus.SUCCESS
                 except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
-                    status = ToolCallStatus.FAILURE
                     content = f"Error calling {call['name']}: {exc}"
-                duration_ms = (time.perf_counter() - started) * 1000
+                    status = ToolCallStatus.FAILURE
+                return content, status, (time.perf_counter() - started) * 1000
 
+        # The calls of one model turn are independent of each other (the
+        # model only sees their results next turn), so they run together.
+        outcomes = await asyncio.gather(*(execute(call, may_run) for call, may_run in zip(calls, allowed)))
+
+        tool_messages: list[ToolMessage] = []
+        for call, (content, status, duration_ms) in zip(calls, outcomes):  # audit and reply in call order
             await audit_service.record(
                 AuditRecord(
                     conversation_id=state["conversation_id"],
@@ -287,7 +298,7 @@ def build_agent_graph(
                 ToolMessage(content=fence_tool_output(content, status), tool_call_id=call["id"], name=call["name"])
             )
 
-        return {"messages": tool_messages, "tool_call_count": tool_call_count}
+        return {"messages": tool_messages, "tool_call_count": state["tool_call_count"] + len(calls)}
 
     async def await_approval_node(state: GraphState) -> dict[str, Any]:
         last_message = state["messages"][-1]

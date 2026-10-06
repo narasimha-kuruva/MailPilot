@@ -32,6 +32,7 @@ from mailpilot.agent.langgraph_agent import LangGraphAgent
 from mailpilot.audit.in_memory_audit import InMemoryAuditService
 from mailpilot.audit.service import AuditService
 from mailpilot.config import Settings, get_settings
+from mailpilot.gmail.caching import CachingGmailClient
 from mailpilot.gmail.client import GmailClient
 from mailpilot.gmail.google_client import GoogleGmailClient
 from mailpilot.intelligence.gemini_service import GeminiIntelligenceService
@@ -65,7 +66,11 @@ def _unavailable(exc: LLMProviderError) -> HTTPException:
 
 @lru_cache
 def get_gmail_client() -> GmailClient:
-    return GoogleGmailClient(get_settings())
+    settings = get_settings()
+    client: GmailClient = GoogleGmailClient(settings)
+    if settings.gmail_cache_seconds > 0:
+        client = CachingGmailClient(client, ttl_seconds=settings.gmail_cache_seconds)
+    return client
 
 
 @lru_cache

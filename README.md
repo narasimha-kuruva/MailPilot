@@ -347,6 +347,11 @@ over stdio and listed 11 tools. It called `list_labels` and
   raises rather than returning a partial list that the agent would present
   as the whole answer. Only a message deleted between listing and fetching
   is skipped.
+- **A short read cache.** Messages and threads read in the last
+  `GMAIL_CACHE_SECONDS` are reused, and a search's results warm it, so
+  search-then-read or summarize-then-extract costs one fetch. Searches are
+  never cached. Any label, draft or send clears it, and drafts are never
+  cached, so an approval always shows the draft as it is now.
 - **Sends are never retried automatically.** A failed send doesn't tell
   you whether the email went out. The idempotency guard (below) is the
   layer that decides whether a send may run.
@@ -575,7 +580,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 333 unit tests, no network
+pytest                                                       # 345 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -634,8 +639,10 @@ All settings come from environment variables or `.env` (see
 | `AGENT_MAX_LLM_RETRIES` | `3` | Retries per model call on transient errors |
 | `AGENT_LLM_RETRY_BASE_DELAY_SECONDS` | `2.0` | Backoff base for model calls |
 | `AGENT_LLM_TIMEOUT_SECONDS` | `60` | Per model-call attempt; raise for CPU-only models |
+| `AGENT_MAX_PARALLEL_TOOL_CALLS` | `4` | The tool calls of one model turn run together, at most this many at once |
 | `GMAIL_MAX_RETRIES` / `GMAIL_RETRY_BASE_DELAY_SECONDS` | `3` / `1.0` | Gmail retries (never for sends) |
 | `GMAIL_MAX_CONCURRENT_FETCHES` | `5` | Parallel body fetches per search |
+| `GMAIL_CACHE_SECONDS` | `30` | Reuse messages and threads read this recently (searches are never cached; any write clears it). `0` turns it off |
 | `STATE_BACKEND` / `STATE_DIR` | `sqlite` / `./data/state` | Where conversations, approvals, the audit trail and completed sends are kept (`memory`: lost on restart). See [Persistence](#persistence) |
 | `LLM_INPUT_USD_PER_MILLION_TOKENS` / `LLM_OUTPUT_USD_PER_MILLION_TOKENS` | `0` / `0` | Cost estimate in `/metrics`; 0 turns it off |
 | `MAILPILOT_RUN_INTEGRATION_TESTS` | — | `1` enables the integration tests |
@@ -741,12 +748,15 @@ evaluation:
 - **Prompt-injection resistance at the prompt level is best effort.** The
   guarantees are the structural ones in [Safety](#safety). The fact check
   on drafts only recognizes dates and amounts.
-- **Efficiency left on the table.** Tool calls within one model turn run
-  one after another. A thread read by two tools in one run is fetched
-  twice. Services are built on the first agent request, not at startup,
-  so `/health` works without credentials but the first request pays the
-  setup cost. FastAPI also builds them for a request it then rejects as
-  invalid.
+- **Startup cost on the first request.** Services are built on the first
+  agent request, not at startup, so `/health` works without credentials
+  but the first request pays the setup cost. FastAPI also builds them for
+  a request it then rejects as invalid.
+- **Local models gain little from parallel tool calls.** Tool calls in one
+  turn run together, but Ollama serves one model request at a time unless
+  `OLLAMA_NUM_PARALLEL` is raised. With `gemma4:e2b`, sequential and
+  concurrent runs of the same scenario measured the same within the noise.
+  The gain is in parallel Gmail calls, and in model calls with Gemini.
 - **Verification gaps.** The approve-and-send path has run end to end
   against the in-memory mailbox (scripted and live), not against real
   Gmail. The Docker image has never been built.
