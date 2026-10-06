@@ -6,12 +6,17 @@ searches, reads, classifies and summarizes your mail, retrieves related
 context, and drafts replies. It only sends an email after a person
 approves that specific send, having seen who it goes to and what it says.
 
-All five build phases are complete. What has been verified against real
-services, and what hasn't, is called out where it matters. The short
-version: the read paths, the agent loop and the evaluation suite have run
-against a real Gmail inbox and a real local model. The approve-and-send
-path has run end to end only against the in-memory evaluation mailbox, and
-the Docker image has never been built (see [Known limitations](#known-limitations)).
+All five build phases are complete, along with the follow-up work listed
+below. What has been verified against real services, and what hasn't, is
+called out where it matters. In short:
+
+- **Verified against a real Gmail inbox and a real local model:** the read
+  paths, the agent loop, the evaluation suite, persistence across a
+  restart, the MCP server, and one real approve-and-send (to the account's
+  own address).
+- **Not yet verified:** the Docker image has not been built. The CI
+  workflow will build it on the first push (see
+  [Known limitations](#known-limitations)).
 
 - [Quick start](#quick-start)
 - [Talking to the agent](#talking-to-the-agent)
@@ -757,6 +762,9 @@ evaluation:
   `OLLAMA_NUM_PARALLEL` is raised. With `gemma4:e2b`, sequential and
   concurrent runs of the same scenario measured the same within the noise.
   The gain is in parallel Gmail calls, and in model calls with Gemini.
-- **Verification gaps.** The approve-and-send path has run end to end
-  against the in-memory mailbox (scripted and live), not against real
-  Gmail. The Docker image has never been built.
+- **Verification gaps.** The Docker image has not been built yet; CI
+  builds and smoke-tests it on the first push. The approve-and-send path
+  has been verified against real Gmail once: on 2026-10-06, one email went
+  to the account's own address after its approval card showed exactly
+  that recipient. It has run many more times against the in-memory
+  mailbox.
