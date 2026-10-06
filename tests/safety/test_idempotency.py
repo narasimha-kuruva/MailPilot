@@ -48,12 +48,13 @@ def test_abandoned_action_can_be_tried_again() -> None:
 class SlowFailingGmailClient(FakeGmailClient):
     """Sends take a while (so two approvals can overlap); the first `failures` sends raise."""
 
-    def __init__(self, failures: int = 0) -> None:
+    def __init__(self, failures: int = 0, send_seconds: float = 0.01) -> None:
         super().__init__()
         self._failures = failures
+        self._send_seconds = send_seconds
 
     async def send_email(self, draft_id: str) -> EmailMessage:
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(self._send_seconds)
         if self._failures:
             self._failures -= 1
             self.calls.append(("send_email_failed", (draft_id,)))
@@ -61,15 +62,19 @@ class SlowFailingGmailClient(FakeGmailClient):
         return await super().send_email(draft_id)
 
 
-def _send(call_id: str) -> AIMessage:
-    return AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"draft_id": "draft-1"}, "id": call_id}])
+def _send(call_id: str, **extra_args: object) -> AIMessage:
+    args = {"draft_id": "draft-1", **extra_args}
+    return AIMessage(content="", tool_calls=[{"name": "send_email", "args": args, "id": call_id}])
 
 
 async def _two_conversations_awaiting_the_same_send(
     gmail_client: FakeGmailClient,
+    sends: list[AIMessage] | None = None,
+    tool_timeout_seconds: float = 30.0,
 ) -> tuple[LangGraphAgent, InMemoryAuditService]:
-    """Conversations c1 and c2 each end AWAITING_APPROVAL for send_email(draft-1)."""
-    chat_model = FakeChatModel([_send("call_1"), _send("call_2"), AIMessage(content="Done."), AIMessage(content="Done.")])
+    """Conversations c1, c2, ... each end AWAITING_APPROVAL for send_email(draft-1)."""
+    sends = sends or [_send("call_1"), _send("call_2")]
+    chat_model = FakeChatModel([*sends, *[AIMessage(content="Done.") for _ in sends]])
     tools = build_tools(gmail_client)
     audit_service = InMemoryAuditService()
     agent = LangGraphAgent(
@@ -77,9 +82,10 @@ async def _two_conversations_awaiting_the_same_send(
         tools=tools,
         approval_service=InMemoryApprovalService(),
         audit_service=audit_service,
+        tool_timeout_seconds=tool_timeout_seconds,
     )
-    for conversation_id in ("c1", "c2"):
-        state = await agent.run(AgentRequest(instruction="send the reply", conversation_id=conversation_id))
+    for index in range(len(sends)):
+        state = await agent.run(AgentRequest(instruction="send the reply", conversation_id=f"c{index + 1}"))
         assert state.status is AgentRunStatus.AWAITING_APPROVAL
     return agent, audit_service
 
@@ -115,7 +121,7 @@ async def test_concurrent_approvals_of_the_same_draft_send_once() -> None:
     assert gmail_client.sent_draft_ids == ["draft-1"]
     records = {r.status: r for r in [await _send_record(audit_service, c) for c in ("c1", "c2")]}
     assert set(records) == {ToolCallStatus.SUCCESS, ToolCallStatus.SKIPPED}
-    assert "already running" in (records[ToolCallStatus.SKIPPED].result_summary or "")
+    assert "still running" in (records[ToolCallStatus.SKIPPED].result_summary or "")
 
 
 @pytest.mark.asyncio
@@ -138,6 +144,41 @@ async def test_rejecting_does_not_consume_the_action() -> None:
     agent, _ = await _two_conversations_awaiting_the_same_send(gmail_client)
 
     await agent.resume("c1", approved=False)
+    await agent.resume("c2", approved=True)
+
+    assert gmail_client.sent_draft_ids == ["draft-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_send_stays_reserved_until_it_really_finishes() -> None:
+    """Timing out stops the wait, not the send (it runs on in a worker thread).
+    Releasing the reservation at the timeout would let a second approval send
+    the same draft while the first is still in flight."""
+    gmail_client = SlowFailingGmailClient(send_seconds=0.2)
+    agent, audit_service = await _two_conversations_awaiting_the_same_send(
+        gmail_client, sends=[_send("call_1"), _send("call_2"), _send("call_3")], tool_timeout_seconds=0.05
+    )
+
+    await agent.resume("c1", approved=True)  # gives up waiting after 0.05s; the send carries on
+    await agent.resume("c2", approved=True)  # while it is still running
+    await asyncio.sleep(0.3)  # the first send completes
+    await agent.resume("c3", approved=True)  # after it completed
+
+    assert gmail_client.sent_draft_ids == ["draft-1"]
+    first, second, third = [await _send_record(audit_service, c) for c in ("c1", "c2", "c3")]
+    assert first.status is ToolCallStatus.FAILURE and "may still complete" in (first.result_summary or "")
+    assert second.status is ToolCallStatus.SKIPPED and "still running" in (second.result_summary or "")
+    assert third.status is ToolCallStatus.SKIPPED and "already ran earlier" in (third.result_summary or "")
+
+
+@pytest.mark.asyncio
+async def test_arguments_the_tool_ignores_do_not_make_a_different_send() -> None:
+    gmail_client = FakeGmailClient()
+    agent, _ = await _two_conversations_awaiting_the_same_send(
+        gmail_client, sends=[_send("call_1"), _send("call_2", confirm=True)]
+    )
+
+    await agent.resume("c1", approved=True)
     await agent.resume("c2", approved=True)
 
     assert gmail_client.sent_draft_ids == ["draft-1"]

@@ -19,6 +19,13 @@ arguments -- and lets it run once:
   wasn't sent -- but Gmail deletes a draft once it is sent, so retrying a
   send that did go out fails with "not found" rather than sending twice.
 
+The caller settles the reservation when the action *actually* ends, not
+when it stops waiting: a send that outlives its timeout keeps running in a
+worker thread, and releasing it early would let a second approval send the
+same draft concurrently (see `LangGraphAgent._execute_approved`). Keys are
+built from the arguments after schema validation, so fields the tool
+ignores can't make one send look like two.
+
 State is in memory and per process, like the other services in this
 phase, and lives as long as the process: one entry per approved action.
 """

@@ -11,6 +11,7 @@ explicit, still-valid human decision (Phase 4.6 -- approvals expire after
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable
 from uuid import uuid4
@@ -319,40 +320,59 @@ class LangGraphAgent(Agent):
 
         Returns the result text, its status, and how long it ran (None if it didn't).
         """
-        key = idempotency_key(pending.tool_name, pending.tool_args)
+        try:
+            tool = self._tools[pending.tool_name]
+            # Key on the validated arguments: extra fields the schema ignores
+            # must not make the same send look like a different action.
+            args = tool.args_schema.model_validate(pending.tool_args).model_dump()
+        except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
+            return f"Error calling {pending.tool_name}: {exc}", ToolCallStatus.FAILURE, None
+
+        key = idempotency_key(pending.tool_name, args)
         if not self._idempotency.try_begin(key):
-            previous = self._idempotency.completed_result(key)
-            if previous is None:
-                reason = "the same action is already running from another approval"
+            if self._idempotency.completed_result(key) is None:
+                reason = "the same action is still running from an earlier approval"
             else:
-                reason = f"this exact action already ran earlier ({previous[:200]})"
+                reason = "this exact action already ran earlier"
             return (
                 f"Not executed: {reason}. MailPilot never runs an approved '{pending.tool_name}' twice.",
                 ToolCallStatus.SKIPPED,
                 None,
             )
 
-        tool = self._tools[pending.tool_name]
-        content = f"'{pending.tool_name}' was interrupted before it finished."
-        status = ToolCallStatus.FAILURE
+        # The action runs as its own task, and the reservation is settled when
+        # that task really ends -- not when this call stops waiting for it. A
+        # send that outlives the timeout is still running in its worker thread
+        # (cancelling the wait can't stop it); releasing the reservation then
+        # would let a second approval send the same draft concurrently.
         started = time.perf_counter()
+        task = asyncio.ensure_future(tool.run(**args))
+        task.add_done_callback(lambda done: self._settle(key, done))
         try:
-            # Bounded by the same tool timeout as every other tool call,
-            # but never auto-retried -- see mailpilot.gmail.google_client
-            # for why a send is never blindly retried.
-            result = await with_timeout(lambda: tool.run(**pending.tool_args), self._tool_timeout_seconds)
-            content = serialize_result(result)
-            status = ToolCallStatus.SUCCESS
+            # Bounded by the same tool timeout as every other tool call, but
+            # never auto-retried -- see mailpilot.gmail.google_client for why
+            # a send is never blindly retried.
+            result = await asyncio.wait_for(asyncio.shield(task), self._tool_timeout_seconds)
+        except TimeoutError:
+            content = (
+                f"'{pending.tool_name}' did not finish within {self._tool_timeout_seconds}s and may still "
+                "complete. It is not retried, and it can't be approved again until it has finished."
+            )
+            status = ToolCallStatus.FAILURE
         except Exception as exc:  # noqa: BLE001 - surfaced to the LLM & audit trail, not swallowed
             content = f"Error calling {pending.tool_name}: {exc}"
-        finally:
-            # Also on cancellation, so an interrupted action can't stay
-            # "running" forever and block every later approval of it.
-            if status is ToolCallStatus.SUCCESS:
-                self._idempotency.complete(key, content)
-            else:
-                self._idempotency.abandon(key)
+            status = ToolCallStatus.FAILURE
+        else:
+            content = serialize_result(result)
+            status = ToolCallStatus.SUCCESS
         return content, status, (time.perf_counter() - started) * 1000
+
+    def _settle(self, key: str, task: asyncio.Future) -> None:
+        """Record how an approved action ended: done for good, or free to be approved again."""
+        if not task.cancelled() and task.exception() is None:
+            self._idempotency.complete(key, serialize_result(task.result())[:500])
+        else:
+            self._idempotency.abandon(key)
 
     async def _build_approval_description(self, pending: PendingToolCall) -> str:
         """Best-effort, human-reviewable description of the pending action.
