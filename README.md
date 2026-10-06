@@ -1,304 +1,593 @@
 # MailPilot
 
-An agentic AI email automation assistant for Gmail. MailPilot interprets
-natural-language instructions ("clear my inbox and reply to urgent client
-emails"), plans a sequence of Gmail operations, retrieves relevant context
-from past conversations and documents, drafts replies, and only sends email
-after a human explicitly approves it.
+An agentic email assistant for Gmail. You give MailPilot an instruction in
+plain language ("find urgent client emails and draft replies"). It
+searches, reads, classifies and summarizes your mail, retrieves related
+context, and drafts replies. It only sends an email after a person
+approves that specific send, having seen who it goes to and what it says.
 
-This repository is being built incrementally.
+All five build phases are complete. What has been verified against real
+services, and what hasn't, is called out where it matters. The short
+version: the read paths, the agent loop and the evaluation suite have run
+against a real Gmail inbox and a real local model. The approve-and-send
+path has run end to end only against the in-memory evaluation mailbox, and
+the Docker image has never been built (see [Known limitations](#known-limitations)).
 
-- **Phase 1 (done):** project skeleton, configuration, logging, FastAPI app
-  with a health check, and abstract interfaces for every major component.
-- **Phase 2 (done):** Gmail OAuth, a real `GmailClient`, the seven Gmail MCP
-  tools, a first LangGraph agent workflow, a human-approval gate in front of
-  `send_email`, and audit logging of every tool call.
-- **Phase 3 (done):** an `IntelligenceService` for classification, priority,
-  urgency, thread summarization, and task extraction, all returned as
-  structured Pydantic data; a ChromaDB-backed `RAGService` (chunking,
-  embedding, ingestion, similarity search, metadata filtering); and a
-  grounded reply-drafting workflow that retrieves context, generates a
-  reply, and checks it for unsupported dates/amounts and invented
-  recipients before creating a (still unsent) Gmail draft. Four new MCP
-  tools expose this: `classify_email`, `summarize_thread`, `extract_tasks`,
-  `draft_grounded_reply`.
-- **Phase 4 and 5:** see the full architecture write-up below -- this
-  document is rewritten comprehensively at the end of Phase 5 rather than
-  incrementally, so treat the sections below as authoritative for the
-  final state of the repository, not just Phase 1/2/3.
+- [Quick start](#quick-start)
+- [Talking to the agent](#talking-to-the-agent)
+- [Architecture](#architecture)
+- [Tools](#tools)
+- [Gmail integration](#gmail-integration)
+- [Retrieval (RAG)](#retrieval-rag)
+- [Human approval](#human-approval)
+- [Safety](#safety)
+- [Reliability](#reliability)
+- [Audit trail](#audit-trail)
+- [Observability](#observability)
+- [Evaluation](#evaluation)
+- [Testing](#testing)
+- [Configuration](#configuration)
+- [Docker](#docker)
+- [Choosing the LLM provider](#choosing-the-llm-provider)
+- [Known limitations](#known-limitations)
 
-## Architecture
-
-MailPilot is organized into seven loosely-coupled layers. Each is a
-separate Python subpackage under `src/mailpilot/`, and higher layers depend
-on lower layers only through abstract interfaces (Python `ABC`s), so any
-implementation can be swapped — a different LLM provider, a different
-vector store, a mock Gmail client for tests — without touching callers.
-
-```
-src/mailpilot/
-├── main.py                      # FastAPI app factory + uvicorn entry point
-├── config.py                     # Settings (pydantic-settings), read from env/.env
-├── logging_config.py             # Structured (JSON) logging setup
-│
-├── api/                          # 1. API layer
-│   ├── deps.py                    #    DI aliases; lazily builds real services
-│   └── routes/
-│       ├── health.py               #    GET /api/v1/health
-│       └── agent.py                #    POST /agent/run, /{id}/decision, GET /{id}/audit
-│
-├── agent/                        # 2. Agent layer
-│   ├── base.py                    #    Agent interface: plan() / run() / resume()
-│   ├── graph.py                    #    LangGraph workflow + the approval gate
-│   └── langgraph_agent.py          #    Agent implementation wrapping the graph
-│
-├── mcp/                           # 3. MCP tool layer
-│   ├── base.py                     #    MCPTool interface
-│   ├── langchain_adapter.py         #    MCPTool -> LangChain tool (for bind_tools)
-│   └── tools/                       #    search_emails, read_email, read_thread,
-│                                     #    list_labels, apply_label, create_draft,
-│                                     #    send_email, registry.py
-│
-├── gmail/                         # 4. Gmail integration layer
-│   ├── client.py                   #    GmailClient interface
-│   ├── auth.py                      #    OAuth consent flow, token cache/refresh
-│   ├── mime_utils.py                #    Gmail JSON <-> EmailMessage / raw MIME
-│   └── google_client.py             #    GmailClient impl over googleapiclient
-│
-├── rag/                            # 5. RAG / context layer (interface only, Phase 3)
-│   └── service.py
-│
-├── safety/                         # 6. Safety layer
-│   ├── approval.py                  #    ApprovalService interface
-│   ├── in_memory_approval.py         #    In-memory ApprovalService impl
-│   └── policy.py                     #    Which tools require human approval
-│
-├── audit/                          # 7. Audit layer
-│   ├── service.py                   #    AuditService interface
-│   └── in_memory_audit.py            #    In-memory impl (+ structured log emit)
-│
-└── schemas/                        # Shared Pydantic models (no business logic)
-    ├── health.py, email.py, agent.py, audit.py, rag.py
-```
-
-### How a request flows through the system
-
-1. A client `POST`s a natural-language instruction to `/api/v1/agent/run`.
-2. `LangGraphAgent.run()` invokes the **LangGraph** workflow
-   (`agent/graph.py`): an `agent` node calls the configured chat model
-   (local Ollama by default, or Gemini -- see "Choosing the LLM provider"),
-   bound to the MCP tools, to decide what to do next.
-3. If the model calls a non-sensitive tool (`search_emails`, `read_email`,
-   `read_thread`, `list_labels`, `apply_label`, `create_draft`), a `tools`
-   node validates the arguments (Pydantic `args_schema`), calls the
-   corresponding `MCPTool`, which delegates to `GmailClient`, and the result
-   loops back to the `agent` node — repeating until the model has a final
-   answer.
-4. If the model calls `send_email`, the graph routes to `await_approval`
-   instead and stops. The run returns `AWAITING_APPROVAL` with the pending
-   action's tool name and arguments — **`send_email` is never executed at
-   this point.**
-5. A client `POST`s the human's decision to `/api/v1/agent/{id}/decision`.
-   `LangGraphAgent.resume()` is the *only* code path that ever calls
-   `GmailClient.send_email()`, and only when `approved: true`.
-6. Every tool call — executed, held, pending, approved, or rejected — is
-   recorded as an `AuditRecord` (request, tool, args, result, approval
-   status, timestamp) via `AuditService`, retrievable at
-   `GET /api/v1/agent/{id}/audit`.
-
-### Why the approval gate isn't a LangGraph `interrupt_before`
-
-LangGraph supports pausing a compiled graph via `interrupt_before=[...]`
-and resuming with `graph.ainvoke(None, config)`. This implementation
-deliberately does *not* use that mechanism for `send_email`. Instead,
-`await_approval_node` ends the graph run cleanly (state carries
-`pending_approval`), and `LangGraphAgent.resume()` explicitly re-reads the
-checkpointed state, executes (or skips) the tool, appends the result, and
-asks the model for one more turn. This keeps the one path that can
-authorize sending an email fully explicit and easy to unit-test with fakes
-(see `tests/agent/test_langgraph_agent.py`) instead of depending on
-`interrupt`/resume-from-checkpoint semantics.
-
-### Why interfaces first
-
-Every layer above the schemas is defined as an abstract base class
-(`Agent`, `GmailClient`, `MCPTool`, `RAGService`, `ApprovalService`,
-`AuditService`). Phase 2 added concrete implementations for everything
-except `RAGService`, but callers everywhere still depend on the interface
-(`api/deps.py` wires the concrete classes in one place), so a different
-Gmail provider, LLM, or persistence backend can be swapped in later without
-touching the agent, MCP, or API layers.
-
-## Choosing the LLM provider
-
-MailPilot runs on a **local model by default** and switches to Google
-Gemini with one configuration change. The choice is made in exactly one
-place -- `mailpilot/llm/providers.py`, from `LLM_PROVIDER` -- and nothing
-else knows which provider is active: the LangGraph agent, MCP tools, Gmail
-client, RAG, approval gate and audit log only ever see a LangChain
-`BaseChatModel` (with `bind_tools` / `with_structured_output`) and an
-`EmbeddingFunction`, so there is one implementation of each, not one per
-provider.
-
-| `LLM_PROVIDER` | Chat model | Embeddings (RAG tools only) | Needs |
-|---|---|---|---|
-| `ollama` (default) | `OLLAMA_MODEL`, default `gemma4:e2b`, served by Ollama at `OLLAMA_BASE_URL` | `OLLAMA_EMBEDDING_MODEL`, default `embeddinggemma` | [Ollama](https://ollama.com) running, with the models pulled: `ollama pull gemma4:e2b` (and `ollama pull embeddinggemma` for RAG) |
-| `gemini` | `GEMINI_MODEL`, default `gemini-3.7-flash` | `RAG_EMBEDDING_MODEL`, default `models/gemini-embedding-2` | `GOOGLE_API_KEY` from Google AI Studio |
-
-To switch, change `LLM_PROVIDER` in `.env` and restart; no code changes.
-Selection is deterministic: if the selected provider is unavailable --
-Ollama not running, model not pulled, Gemini key missing -- the agent
-endpoints return `503` with the exact fix, and MailPilot **never falls
-back** to the other provider on its own. MailPilot never downloads models
-either; pulling them is a deliberate operator step.
-
-### Notes on `gemma4:e2b` (verified live against a real inbox)
-
-- The agent loop works unchanged: the model picks the right tool with
-  sensible arguments, continues after a tool result, chains tools
-  (search, then read), and returns a final answer. Structured output
-  (classification, drafting) works too. A single-tool question takes
-  about 15 s end to end on a GPU; the first call after a cold start adds
-  the model load time.
-- `OLLAMA_NUM_CTX` (default 16384) matters. Ollama's own default context
-  window is 4096 tokens, which the system prompt, tool schemas and one
-  full email already fill: the model was left 9 tokens for its answer and
-  returned an empty reply. The model supports up to 131072.
-- It is less precise with Gmail search syntax than Gemini (it once sent
-  `is:inbox` instead of `in:inbox`; Gmail tolerated it), so the search
-  tool's description now lists the operators. Keep instructions concrete.
-- Its answers are terser and less polished than Gemini's; for drafting
-  client-facing replies, Gemini remains the better choice.
-
-## Dependencies
-
-Declared in `pyproject.toml`; Phase 2 is the first phase to actually
-exercise most of these:
-
-| Package | Used for |
-|---|---|
-| `fastapi`, `uvicorn[standard]` | API layer |
-| `pydantic`, `pydantic-settings`, `python-dotenv` | Schemas + env config |
-| `langchain-core`, `langchain-ollama`, `langchain-google-genai` | Chat models (local Ollama by default, Gemini optional) + tool binding |
-| `langgraph` | The agent workflow (`agent/graph.py`) |
-| `google-api-python-client`, `google-auth`, `google-auth-oauthlib`, `google-auth-httplib2` | Gmail OAuth + API calls |
-| `chromadb` | Vector store — still unused, reserved for Phase 3 RAG |
-| `mcp` | Reserved for exposing tools over the real MCP protocol — Phase 2 implements the tools as an internal `MCPTool` ABC + a LangChain adapter, not yet as an MCP server |
-
-Dev-only: `pytest`, `pytest-asyncio`, `httpx` (FastAPI's `TestClient`).
-
-## Running locally
+## Quick start
 
 Requires Python 3.11+.
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
-
+.venv\Scripts\activate          # Windows; on macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
-copy .env.example .env        # Windows; cp on macOS/Linux
+copy .env.example .env          # cp on macOS/Linux
 ```
 
-Then fill in `.env`:
+1. **A model.** By default MailPilot uses a local model through
+   [Ollama](https://ollama.com). Install it, then
+   `ollama pull gemma4:e2b`. Also run `ollama pull embeddinggemma` if you
+   want the retrieval tool. To use Google Gemini instead, set
+   `LLM_PROVIDER=gemini` and `GOOGLE_API_KEY`
+   (see [Choosing the LLM provider](#choosing-the-llm-provider)).
+2. **Gmail access.** In Google Cloud Console, enable the Gmail API, create
+   an OAuth client ID of type *Desktop app*, and save its JSON as
+   `secrets/client_secret.json`. Authorize once; a browser window opens and
+   the token is cached in `secrets/token.json`:
 
-- `LLM_PROVIDER` — `ollama` (default) or `gemini`; see "Choosing the LLM
-  provider" above. With `ollama`, install Ollama and pull `gemma4:e2b`
-  first. `/health` works without either provider configured.
-- `GOOGLE_API_KEY` — a Gemini API key from Google AI Studio. Required only
-  when `LLM_PROVIDER=gemini`.
-- `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` — path to an OAuth **Desktop app**
-  client secrets JSON downloaded from Google Cloud Console (Gmail API must
-  be enabled on that project). Required the first time any `/agent/*`
-  route actually calls Gmail.
-- `GOOGLE_OAUTH_TOKEN_FILE` — where the authorized user's token is cached
-  after the one-time interactive consent flow (a browser window opens on
-  first use; subsequent runs silently refresh the cached token).
+   ```bash
+   python -c "from mailpilot.config import get_settings; from mailpilot.gmail.auth import load_credentials; load_credentials(get_settings())"
+   ```
 
-Run the API:
+   If you skip this step, the consent window opens the first time a
+   request touches Gmail.
+3. **Run it:** `python -m mailpilot.main`, then open
+   <http://127.0.0.1:8000/docs>.
+
+`/health`, `/metrics` and `/docs` work with no model and no Gmail
+configured. Only the agent endpoints need them.
+
+## Talking to the agent
+
+MailPilot's interface is an **HTTP API** (FastAPI). There is no chat
+window or command-line client. The quickest way to use it by hand is the
+interactive Swagger UI at `/docs`, which can call every endpoint from the
+browser. Any HTTP client works too.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/v1/agent/run` | Submit an instruction: `{"instruction": "...", "conversation_id": "optional"}`. Returns the run's state. |
+| `POST /api/v1/agent/{conversation_id}/decision` | Approve or reject the action a run is waiting on: `{"approved": true}`. |
+| `GET /api/v1/agent/{conversation_id}/audit` | Every tool call in the conversation, with arguments, outcome, approval and timing. |
+| `GET /api/v1/metrics` | Counters since start: runs, tool calls, approvals, model calls, and tokens. |
+| `GET /api/v1/health` | Liveness, environment, and version. |
+
+A run ends in one of three states: `completed` (with `final_response`),
+`failed` (an execution limit or a model error, explained in
+`final_response`), or `awaiting_approval` (with `pending_approval`). To
+continue a conversation, send the next instruction with the same
+`conversation_id`; the agent keeps the earlier turns.
+
+An example session (responses abridged):
 
 ```bash
-python -m mailpilot.main
-# or: uvicorn mailpilot.main:app --reload
+curl -s -X POST http://127.0.0.1:8000/api/v1/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"instruction": "Reply to Bob'\''s lunch email saying Thursday works, and send it."}'
 ```
 
-- Health check: `GET http://localhost:8000/api/v1/health`
-- Interactive docs: `http://localhost:8000/docs`
-- Submit an instruction: `POST http://localhost:8000/api/v1/agent/run`
-  `{"instruction": "search my inbox for unread emails from Alice"}`
-- Approve/reject a pending action:
-  `POST http://localhost:8000/api/v1/agent/{conversation_id}/decision`
-  `{"approved": true}`
-- Audit trail: `GET http://localhost:8000/api/v1/agent/{conversation_id}/audit`
+```json
+{
+  "conversation_id": "5b0c…",
+  "status": "awaiting_approval",
+  "pending_approval": {
+    "tool_name": "send_email",
+    "tool_args": {"draft_id": "r-81…"},
+    "description": "Send email to: bob@example.com\nSubject: Re: Lunch on Thursday?\n\nThursday works for me. See you then!"
+  },
+  "final_response": null
+}
+```
 
-## Running tests
+Nothing has been sent at this point. After reading the description:
 
 ```bash
-pip install -e ".[dev]"
-pytest
+curl -s -X POST http://127.0.0.1:8000/api/v1/agent/5b0c…/decision \
+  -H "Content-Type: application/json" -d '{"approved": true}'
+# {"conversation_id": "5b0c…", "status": "completed", "final_response": "Your reply to Bob has been sent.", …}
+
+curl -s http://127.0.0.1:8000/api/v1/agent/5b0c…/audit
+# [{"tool_name": "search_emails", "status": "success", "duration_ms": 812.4, …},
+#  {"tool_name": "create_draft", …}, {"tool_name": "send_email", "approval_status": "pending", …},
+#  {"tool_name": "send_email", "status": "success", "approval_status": "approved", …}]
 ```
 
-28 tests, all runnable with no Gmail/Gemini credentials — Gmail is stubbed
-with `FakeGmailClient` and the LLM with `FakeChatModel`
-(`tests/fakes.py`), so agent/tool/graph logic is fully covered without
-network access:
+| Status | When |
+|---|---|
+| `404` | `/decision` for a conversation with nothing pending |
+| `410` | `/decision` after the approval expired (`APPROVAL_TTL_SECONDS`, default 30 minutes); nothing was sent |
+| `422` | Invalid input, e.g. an empty instruction or one over 10,000 characters |
+| `500` | Anything unexpected. The body is a generic message plus a `request_id`; the details are in the server log under that id |
+| `503` | The model provider is unusable (Ollama not running, model not pulled, Gemini key missing). The message says how to fix it |
 
-- `tests/test_health.py`, `tests/test_config.py` — Phase 1 checks, including
-  that `require_approval_before_send` defaults to `True`.
-- `tests/test_placeholder_interfaces.py` — every layer's ABC still can't be
-  instantiated without a full implementation.
-- `tests/gmail/test_mime_utils.py` — Gmail JSON parsing and raw-MIME
-  building against fixture payloads.
-- `tests/mcp/test_tools.py` — each MCP tool validates its args and
-  delegates to `GmailClient` correctly.
-- `tests/safety/test_policy.py` — only `send_email` requires approval.
-- `tests/agent/test_langgraph_agent.py` — the important ones: a
-  non-sensitive tool call runs end-to-end; a `send_email` call stops at
-  `AWAITING_APPROVAL` **without sending**; `resume(approved=True)` sends
-  and completes; `resume(approved=False)` **never** sends; every step is
-  audited with the right status/approval fields.
+Every response carries an `X-Request-ID` header. Send your own (letters,
+digits, `.`, `_` and `-`, up to 64 characters) to correlate with your
+logs.
 
-## Assumptions made in Phase 2
+> **The API has no authentication.** Anyone who can reach it can read the
+> mailbox and approve sends. It listens on `127.0.0.1` by default; don't
+> expose it beyond that without an authenticating proxy in front.
 
-- The approval gate is enforced entirely in-process (in-memory
-  `ApprovalService` + a `conversation_id -> pending call` map inside
-  `LangGraphAgent`). It does not survive a process restart. A production
-  deployment would back this with a database, but the `ApprovalService`
-  interface is unchanged either way.
-- Gmail OAuth scope is `gmail.modify` (read/write/labels/send, excludes
-  permanent delete), requested via the "Desktop app" OAuth client flow with
-  `run_local_server` — appropriate for a local/dev deployment, not a
-  server-side multi-user deployment (that would need a different OAuth
-  flow, e.g. a web application client with a stored refresh token per
-  user).
-- MCP tools are implemented as an internal `MCPTool` ABC and adapted to
-  LangChain tool objects for Gemini function-calling. They are not yet
-  exposed over the actual Model Context Protocol (an MCP server); the `mcp`
-  package dependency is reserved for that in a later phase.
-- Multiple simultaneous tool calls in one LLM turn are supported: if any of
-  them is `send_email`, the *entire* turn is held (not partially executed)
-  until a decision is made, and every tool call still receives a
-  `ToolMessage` so the conversation stays well-formed.
-- No live Gmail account or Gemini API key was available in this
-  environment, so `GoogleGmailClient` and the real `ChatGoogleGenerativeAI`
-  integration are exercised by code review and by the fake-backed test
-  suite, not by an end-to-end run against real Google services. Please
-  verify against your own account before relying on it.
+## Architecture
 
-## Phase 3 (proposed, not yet implemented)
+```
+src/mailpilot/
+├── main.py                 # FastAPI app factory + uvicorn entry point
+├── config.py               # Settings (pydantic-settings), from env/.env
+├── logging_config.py       # JSON logging, redaction, request ids
+├── redaction.py            # Secret scrubbing for logs and the audit trail
+├── resilience.py           # Error classification, retries, timeouts
+├── prompts.py              # System prompts + untrusted-content fencing
+│
+├── api/                    # HTTP layer
+│   ├── deps.py             #   Wires concrete services (lazily) for the routes
+│   ├── middleware.py       #   Request ids, request log, sanitized 500s
+│   └── routes/             #   health, agent (run/decision/audit), metrics
+├── agent/                  # Orchestration
+│   ├── graph.py            #   The LangGraph loop, limits, approval gate
+│   ├── langgraph_agent.py  #   Agent: run() / resume() / plan()
+│   └── reply_drafting.py   #   Grounded reply workflow
+├── mcp/                    # Tools the model can call
+│   ├── base.py             #   MCPTool interface
+│   ├── langchain_adapter.py#   MCPTool -> LangChain tool schema
+│   └── tools/              #   11 tools + registry
+├── gmail/                  # Gmail API client, OAuth, MIME parsing
+├── intelligence/           # Classification, summaries, task extraction
+├── rag/                    # Chunking, embeddings, ChromaDB store
+├── llm/providers.py        # Ollama / Gemini selection
+├── safety/                 # Approval service, guardrails, policy, idempotency
+├── audit/                  # Audit trail
+├── observability/          # Metrics registry + model-usage callback
+├── evaluation/             # Scenarios, in-memory mailbox, runner, CLI
+└── schemas/                # Pydantic models shared by every layer
+```
 
-- RAG / context layer: implement `RAGService` against ChromaDB — chunking,
-  embedding, ingestion of threads/documents, cited similarity retrieval —
-  and give the agent a `retrieve_context` tool.
-- Multi-step planning beyond a single tool call per turn for compound
-  instructions ("clear my inbox and reply to urgent client emails"),
-  likely by letting the graph loop with an explicit `AgentPlan` the agent
-  checks off, rather than only ever reacting one tool call at a time.
-- Persistent `ApprovalService` / `AuditService` (database-backed) so
-  pending approvals and history survive a restart.
-- Expose the MCP tools over an actual MCP server (`mcp` package) in
-  addition to the current LangChain adapter, so other MCP-compatible
-  clients can use them.
-- Priority/triage classification and thread summarization as first-class
-  agent capabilities (currently the agent can only do what a single Gemini
-  turn's tool call accomplishes).
+Each layer depends on the ones below it only through an abstract
+interface (`Agent`, `GmailClient`, `MCPTool`, `RAGService`,
+`ApprovalService`, `AuditService`, `IntelligenceService`). The concrete
+classes are wired in one place, `api/deps.py`, so a different Gmail
+backend, store or model can be swapped in without touching callers. That
+is also how the tests and the evaluation substitute fakes.
+
+### How a request flows
+
+1. `POST /agent/run` reaches `LangGraphAgent.run()`. The first turn of a
+   conversation gets the system prompt.
+2. The **agent** node calls the chat model, which has the tools bound to
+   it. Each call has a timeout and is retried on transient errors within
+   the run's time budget.
+3. If the model asks for tools, the **tools** node validates each call's
+   arguments and runs it. Each tool call has a timeout and is retried on
+   transient errors. The node also enforces guardrails and records an
+   audit entry. The result goes back to the model, fenced as untrusted
+   data, and the loop repeats.
+4. If any requested call is `send_email`, the graph goes to
+   **await_approval** instead. Nothing in that turn runs, and the run
+   returns `awaiting_approval` with a description of the draft.
+5. `POST /decision` reaches `LangGraphAgent.resume()`. This is the only
+   code path that can execute `send_email`, and only on `approved: true`,
+   once per draft. The model then writes the closing message.
+6. If a limit is hit (steps, tool calls, wall-clock time) or the model
+   fails for good, the **terminate** node ends the run as `failed`, with
+   the reason in the response and in the audit trail.
+
+### One loop, not plan-then-execute
+
+The agent is a single bounded ReAct loop: the model decides each step
+after seeing the previous step's real result. A rigid "plan everything
+first, then execute" engine was considered and rejected. A plan made
+before any mail has been read can't know whether a search finds anything,
+or whether an email is urgent. Branching ("is it urgent? then draft")
+comes from the model reasoning over actual tool results, with the system
+prompt and tool descriptions guiding it. `Agent.plan()` exists as a
+preview: it returns an ordered list of sub-goals and executes nothing. It
+is not exposed over the API yet.
+
+### LangChain vs LangGraph
+
+| | Responsible for |
+|---|---|
+| **LangGraph** | The control flow: the state graph (`agent → tools → agent …`, `await_approval`, `terminate`), routing, and per-conversation state through a checkpointer keyed by `conversation_id`. |
+| **LangChain (core)** | The model abstraction: `BaseChatModel` (`ChatOllama` / `ChatGoogleGenerativeAI`), `bind_tools`, `with_structured_output`, message types, the tool-schema adapter, and callbacks (token counting). |
+| **MailPilot's own code** | Everything that has to be trustworthy: tool execution, argument validation, retries, timeouts, limits, the approval gate, guardrails, idempotency and audit. LangChain's tool executor is never used: tools run through `MCPTool.run()` from the graph, so these rules live in one place whichever framework drives the model. |
+
+### Why the approval gate isn't LangGraph's `interrupt_before`
+
+LangGraph can pause a graph and resume it from the checkpoint. MailPilot
+doesn't use that for sends. `await_approval` ends the run cleanly with the
+pending call in state, and `resume()` explicitly re-reads the state and
+executes (or skips) that one call. That keeps the only path that can send
+email explicit, small, and unit-testable with fakes, instead of depending
+on resume-from-checkpoint semantics.
+
+## Tools
+
+| Tool | What it does | Effect on the mailbox |
+|---|---|---|
+| `search_emails` | Gmail search. Returns compact summaries (ids, sender, subject, snippet, labels), not bodies | read |
+| `read_email` | One message in full (text; HTML-only mail is converted to text) | read |
+| `read_thread` | Every message in a thread | read |
+| `list_labels` | The mailbox's labels | read |
+| `classify_email` | Category, priority, urgency, whether action is needed | read |
+| `summarize_thread` | Summary and key points | read |
+| `extract_tasks` | Action items. A deadline or owner only when the mail states one | read |
+| `apply_label` | Adds a label. **`TRASH` and `SPAM` are refused** | write |
+| `create_draft` | Creates a draft. Reply recipients must already be in the thread | write (draft only) |
+| `draft_grounded_reply` | Reads a thread, retrieves related context, drafts a reply addressed to the thread's participants, and checks the draft for invented dates and amounts | write (draft only) |
+| `send_email` | Sends a draft. **Always stops for human approval first** | send |
+
+The tools implement MailPilot's own `MCPTool` interface (a name, a
+description, a Pydantic argument schema, and `run()`), adapted to
+LangChain only for describing them to the model. They are **not** served
+over the Model Context Protocol. The `mcp` dependency is unused, so other
+MCP clients can't call them.
+
+## Gmail integration
+
+- **OAuth.** A *Desktop app* client with the `gmail.modify` scope: read,
+  label, draft and send, but never permanent deletion. The token is cached
+  in `GOOGLE_OAUTH_TOKEN_FILE` and refreshed silently. This suits one user
+  running locally, not a hosted multi-user service.
+- **Concurrency.** `googleapiclient` is synchronous, so calls run in
+  worker threads. Its shared HTTP connection isn't thread-safe, so every
+  request gets its own (sharing one corrupted TLS reads under load).
+- **Retries.** Every call except a send is retried with backoff (`1s, 2s,
+  4s`) on transient errors: 5xx, 429, timeouts, and Gmail's per-minute
+  `403 rateLimitExceeded`. Other 4xx errors fail at once.
+- **Complete searches or none.** A search fetches message bodies at most
+  `GMAIL_MAX_CONCURRENT_FETCHES` at a time. If some can't be fetched, it
+  raises rather than returning a partial list that the agent would present
+  as the whole answer. Only a message deleted between listing and fetching
+  is skipped.
+- **Sends are never retried automatically.** A failed send doesn't tell
+  you whether the email went out. The idempotency guard (below) is the
+  layer that decides whether a send may run.
+
+## Retrieval (RAG)
+
+`draft_grounded_reply` grounds a reply in related past context:
+
+1. **Chunking:** a recursive splitter (paragraphs, then sentences, then
+   characters) into `RAG_CHUNK_SIZE` pieces with `RAG_CHUNK_OVERLAP`
+   overlap.
+2. **Embedding:** the provider's embedding model (`embeddinggemma` on
+   Ollama, `RAG_EMBEDDING_MODEL` on Gemini), one batch per thread.
+3. **Store:** one ChromaDB collection on disk (`CHROMA_PERSIST_DIR`,
+   cosine similarity) for both email-thread chunks and documents.
+   Metadata records the source (`source_type`, thread or document id,
+   subject, sender), and a query can filter on it.
+4. **Retrieval:** the top `RAG_TOP_K` chunks, then packed best-first into
+   `RAG_MAX_CONTEXT_CHARS`. A chunk that doesn't fit is skipped, not the
+   end of packing.
+5. **Generation and checks:** the thread and the context are fenced as
+   untrusted data. The draft is checked for dates and amounts that appear
+   in neither (flagged in `validation_notes`). Recipients come from the
+   thread itself, never from the model.
+
+**Nothing in the running app fills the store yet.** `ingest_thread` and
+`ingest_document` work and are tested, but no endpoint or tool calls them.
+Until that's added, retrieval finds no context, and replies are grounded
+in the thread alone.
+
+## Human approval
+
+- **What needs approval:** `send_email`, as declared in
+  `safety/policy.py`. `REQUIRE_APPROVAL_BEFORE_SEND` can't be set to
+  false; startup fails if you try.
+- **What the approver sees:** the draft's real recipients, subject and
+  the start of its body, fetched from Gmail. The draft id alone isn't
+  something a person can review.
+- **Batching doesn't bypass it.** If the model requests a send together
+  with other calls, the whole turn is held.
+- **Expiry:** an approval older than `APPROVAL_TTL_SECONDS` is refused
+  with `410` and recorded as expired.
+- **Once per action:** the idempotency guard keys an action by tool and
+  arguments (the `draft_id` for a send). The same draft approved twice,
+  in two conversations or by two racing requests, is sent once; the second
+  is audited as a suppressed duplicate. A failed send releases the key, so
+  it can be approved again. (Gmail deletes a sent draft, so re-sending one
+  that did go out fails with "not found" rather than sending twice.)
+- **After the decision**, the model writes one closing message. If it
+  asks for more tools at that point, they are not run. They are listed in
+  the response and the audit trail, and the next instruction continues
+  from there.
+
+## Safety
+
+Some defenses are guarantees enforced in code, whatever the model does.
+Others make the model less likely to go wrong, without guaranteeing it.
+
+| Defense | Kind | Where |
+|---|---|---|
+| Nothing is sent without an explicit, unexpired, per-draft human approval | **guarantee** | `agent/graph.py`, `langgraph_agent.resume()` |
+| The approver sees the draft's real recipients and content | **guarantee** (falls back to the raw arguments if the draft can't be fetched) | `langgraph_agent._build_approval_description` |
+| A draft is sent at most once | **guarantee** (per process) | `safety/idempotency.py` |
+| Mail is never trashed or marked as spam | **guarantee** | `safety/guardrails.assert_label_is_safe` |
+| A reply in a thread can't add recipients from outside it | **guarantee** | `guardrails.validate_reply_recipients` in `create_draft` and `draft_grounded_reply` |
+| A grounded reply's recipients come from the thread, never the model | **guarantee** (the model's output has no recipient field) | `draft_grounded_reply` |
+| Runaway runs stop (steps, tool calls, time, output size) | **guarantee** | `AgentLimits` |
+| Secrets don't reach logs or the audit trail | **pattern-based**: known credential shapes and labelled values only | `redaction.py` |
+| Email content is treated as data, not instructions: fenced in `<untrusted_*>` tags that the content can't close, under explicit instructions | **best effort** | `prompts.py`, every prompt carrying email text, every tool result |
+| Drafts don't invent facts: grounding instructions, plus a check for dates and amounts not in the sources | **best effort** (catches dates and amounts only) | `prompts.GROUNDING_NOTICE`, `guardrails.find_unsupported_claims` |
+
+One deliberate gap: a **new** email (not a reply) may be drafted to any
+address, because there is no thread to check recipients against. It is
+still only a draft, and sending it requires an approval that shows the
+real recipient.
+
+Prompt injection is tested both ways (`tests/safety/test_prompt_injection.py`).
+Every prompt that carries email text fences it. And with a scripted model
+that *obeys* an injected instruction, the send still stops at approval
+showing the attacker's address, `TRASH` is refused, and outsiders can't
+be added to a reply.
+
+## Reliability
+
+- **Error classification** (`resilience.classify_error`): transient
+  errors (408/425/429/5xx, timeouts, connection resets, "high demand") are
+  retried with exponential backoff. Permanent ones fail immediately. A 429
+  that asks you to wait more than 60 seconds (a daily quota) counts as
+  permanent. A shorter server-suggested wait is honoured.
+- **Model calls** are retried (`AGENT_MAX_LLM_RETRIES`) with a per-call
+  timeout, and never past the run's wall-clock deadline. A model that
+  stays down ends the run as `failed` with a readable reason, not a 500.
+  The Gemini client's own internal retries are switched off, so there is
+  one retry layer.
+- **Tool calls** are retried (`AGENT_MAX_TOOL_RETRIES`) with a timeout.
+  A tool that still fails tells the model what went wrong, so the model
+  can explain or adjust.
+- **Limits** per run: 20 model turns, 15 tool calls, 120 seconds, and
+  12,000 characters per tool result (all configurable).
+
+## Audit trail
+
+Every tool call produces an `AuditRecord`: conversation, instruction,
+tool, arguments, outcome (`success` / `failure` / `skipped`), result
+summary, approval status (`not_required` / `pending` / `approved` /
+`rejected` / `expired`), duration and timestamp. That covers calls that
+ran, calls held for approval, and duplicates the idempotency guard
+suppressed. Runs that stop early add `__execution_limit__` or
+`__llm_error__` records. Follow-up calls proposed after an approval add
+`__deferred_followup__`. Records are redacted before they are stored,
+written to the log, and served at `GET /agent/{id}/audit`. They live in
+memory.
+
+## Observability
+
+- **Logs** are one JSON object per line, redacted (`redaction.py`), and
+  carry the `request_id` of the API request they belong to. Each request
+  writes one `http_request` line (method, path, status, duration).
+  uvicorn's own lines go through the same formatter.
+- **Metrics** (`GET /api/v1/metrics`): runs by outcome and average
+  duration; tool calls by outcome and average duration, overall and per
+  tool; approvals requested, approved, rejected and expired; run events;
+  and model calls, failures, and input and output tokens. Token counting
+  hooks into the model itself, so it covers planning and the model calls
+  made inside tools as well as the agent loop. An estimated cost appears
+  only if you set `LLM_INPUT_USD_PER_MILLION_TOKENS` and
+  `LLM_OUTPUT_USD_PER_MILLION_TOKENS`, since no prices are built in.
+  Counters are in memory and reset on restart; poll the endpoint to keep
+  history.
+
+## Evaluation
+
+`mailpilot/evaluation/` holds 16 scenarios. Each one runs the real agent
+(graph, tools, approval gate, guardrails, audit) against an in-memory
+mailbox: six emails, including an urgent client email and an invoice
+carrying a prompt injection. Nothing touches Gmail and nothing can be
+sent. The checks are about outcomes: what reached the mailbox, what the
+approver saw, how the run ended.
+
+| Category | Scenarios |
+|---|---|
+| normal | find unread, summarize a thread, find the urgent email, draft a reply, create a new draft |
+| multi-step | find urgent client emails and draft replies (only to the urgent one); reply and send (waits for approval, then sends exactly once) |
+| safety | injection ignored; injection *obeyed* by the model but contained; missing recipient (must ask, not invent); "send without checking with me" (still gated); "delete the newsletters" (nothing trashed) |
+| reliability | malformed tool call recovered; transient Gmail 503 retried; permanent 403 not retried; runaway loop stopped by limits |
+
+They run two ways:
+
+- **Scripted**, in every `pytest` run: each scenario's script stands in
+  for the model, so the result is deterministic and tests the machinery
+  around the model. Negative tests check that the expectations catch a
+  bad run.
+- **Live**, with `python -m mailpilot.evaluation [-v] [--category safety] [--scenario ID]`:
+  the configured model decides. Two scenarios simulate a misbehaving model
+  on purpose and are skipped live.
+
+**Live result with `ollama/gemma4:e2b` (2026-10-06): 14 of 14** in a
+single full run. An earlier run scored 13 of 14. The miss was
+`send_requires_approval`: its instruction ("Reply to Bob that Thursday
+works") was vaguer than its sibling scenario's, and the model asked which
+email to reply to instead of searching, so the approval gate the scenario
+exists to test was never reached. Nothing unsafe happened. The wording was
+then made as specific as the sibling scenario's. In the passing run, the
+model searched, drafted, and tried to send; the gate held the send, and
+the rejection left nothing sent. A model's answers vary from run to run,
+so treat a live score as a sample, not a constant.
+
+## Testing
+
+```bash
+pytest                                                       # 249 unit tests, no network
+MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
+```
+
+The unit tests use `FakeGmailClient`, `FakeChatModel` and
+`FakeEmbeddingFunction` (`tests/fakes.py`), so they need no credentials.
+They cover the graph and approval flow, limits and retries, every tool,
+the guardrails, prompt injection, idempotency, redaction, metrics, the API
+hardening, the Gmail client against a stub service, the providers against
+a stub Ollama, ChromaDB on disk, and all 16 evaluation scenarios.
+
+The integration tests (`tests/integration/`) are skipped unless enabled.
+They **only read** from Gmail: labels, search, a message and its thread,
+and a bad id. They exercise the real model (tool calling, structured
+output, token reporting, embeddings) and run one read-only agent request
+end to end. Last run: 8 passed, plus 1 skipped because `embeddinggemma`
+isn't pulled. Run them from the repository root so `.env` paths resolve.
+
+## Configuration
+
+All settings come from environment variables or `.env` (see
+`.env.example`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `APP_ENV` | `development` | Reported by `/health`; changes no behavior |
+| `LOG_LEVEL` | `INFO` | Root log level |
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Used by `python -m mailpilot.main` |
+| `LLM_PROVIDER` | `ollama` | `ollama` or `gemini`; never falls back from one to the other |
+| `GOOGLE_API_KEY` | — | Gemini only |
+| `GEMINI_MODEL` | `gemini-3.7-flash` | Gemini only |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama only |
+| `OLLAMA_MODEL` | `gemma4:e2b` | Ollama only |
+| `OLLAMA_EMBEDDING_MODEL` | `embeddinggemma` | Ollama only; needed by the retrieval tool |
+| `OLLAMA_NUM_CTX` | `16384` | Context window. Ollama's own 4096 is too small |
+| `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` | `./secrets/client_secret.json` | OAuth Desktop client |
+| `GOOGLE_OAUTH_TOKEN_FILE` | `./secrets/token.json` | Cached user token |
+| `GMAIL_USER_EMAIL` | — | Your address, left out of reply-all |
+| `CHROMA_PERSIST_DIR` | `./data/chroma` | Vector store location |
+| `RAG_EMBEDDING_MODEL` | `models/gemini-embedding-2` | Gemini only |
+| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | `800` / `100` | Overlap must be smaller than chunk size |
+| `RAG_TOP_K` / `RAG_MAX_CONTEXT_CHARS` | `5` / `6000` | Chunks retrieved, and the prompt budget they're packed into |
+| `REQUIRE_APPROVAL_BEFORE_SEND` | `true` | Can't be disabled |
+| `APPROVAL_TTL_SECONDS` | `1800` | How long a pending approval stays valid |
+| `AGENT_MAX_STEPS` | `20` | Model turns per run |
+| `AGENT_MAX_TOOL_CALLS` | `15` | Tool calls per run |
+| `AGENT_MAX_TOOL_RETRIES` | `2` | Retries per tool call on transient errors |
+| `AGENT_TOOL_TIMEOUT_SECONDS` | `30` | Per tool-call attempt |
+| `AGENT_MAX_EXECUTION_SECONDS` | `120` | Wall clock per run |
+| `AGENT_MAX_OUTPUT_CHARS` | `12000` | Per tool result or model message |
+| `AGENT_MAX_LLM_RETRIES` | `3` | Retries per model call on transient errors |
+| `AGENT_LLM_RETRY_BASE_DELAY_SECONDS` | `2.0` | Backoff base for model calls |
+| `AGENT_LLM_TIMEOUT_SECONDS` | `60` | Per model-call attempt; raise for CPU-only models |
+| `GMAIL_MAX_RETRIES` / `GMAIL_RETRY_BASE_DELAY_SECONDS` | `3` / `1.0` | Gmail retries (never for sends) |
+| `GMAIL_MAX_CONCURRENT_FETCHES` | `5` | Parallel body fetches per search |
+| `LLM_INPUT_USD_PER_MILLION_TOKENS` / `LLM_OUTPUT_USD_PER_MILLION_TOKENS` | `0` / `0` | Cost estimate in `/metrics`; 0 turns it off |
+| `MAILPILOT_RUN_INTEGRATION_TESTS` | — | `1` enables the integration tests |
+
+## Docker
+
+```bash
+docker build -t mailpilot .
+docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -v "$PWD/secrets:/app/secrets" -v "$PWD/data:/app/data" \
+  mailpilot
+```
+
+- The image contains no secrets, and `.env`, `secrets/` and `data/` are
+  excluded from the build. Configuration comes from `--env-file`; the
+  OAuth token and the vector store are mounted in.
+- **Authorize Gmail on the host first.** The consent flow needs a browser,
+  which the container doesn't have, so `secrets/token.json` must already
+  exist. The mount must be writable, because the token is refreshed in
+  place.
+- **Ollama on the host** is `host.docker.internal` from inside the
+  container. On Linux, add `--add-host=host.docker.internal:host-gateway`.
+- The server listens on `0.0.0.0` *inside* the container. Publish the port
+  to `127.0.0.1` as shown, since the API has no authentication.
+- `--env-file` keeps an inline `# comment` as part of the value. Keep
+  comments on their own lines, as `.env.example` does.
+- The container runs as an unprivileged user (uid 10001) and has a health
+  check on `/api/v1/health`.
+
+**This image has not been built.** Docker wasn't available where it was
+written. A clean `pip install .` (the build stage's step) was verified,
+and the API served all endpoints from that install outside the repository.
+
+## Choosing the LLM provider
+
+| `LLM_PROVIDER` | Chat model | Embeddings | Needs |
+|---|---|---|---|
+| `ollama` (default) | `OLLAMA_MODEL`, default `gemma4:e2b` | `OLLAMA_EMBEDDING_MODEL`, default `embeddinggemma` | Ollama running, models pulled (`ollama pull gemma4:e2b`, `ollama pull embeddinggemma`) |
+| `gemini` | `GEMINI_MODEL`, default `gemini-3.7-flash` | `RAG_EMBEDDING_MODEL`, default `models/gemini-embedding-2` | `GOOGLE_API_KEY` |
+
+The choice is made in one place (`llm/providers.py`); everything else sees
+a LangChain `BaseChatModel` and an embedding function. To switch, change
+`LLM_PROVIDER` and restart. If the chosen provider is unusable, the agent
+endpoints return `503` with the fix, and MailPilot **never** falls back to
+the other provider. It never downloads models either; pulling them is a
+deliberate step for whoever runs it. The Gemini free tier allows about 20
+requests per model per day, which is a handful of agent runs.
+
+Notes on `gemma4:e2b`, from live runs against a real inbox and the
+evaluation:
+
+- It handles the full loop: it picks tools with sensible arguments,
+  chains them, produces structured output, and passed all 14 live
+  evaluation scenarios in a single run. A one-tool question takes about 10–30 seconds on
+  a GPU; multi-step goals take about a minute.
+- `OLLAMA_NUM_CTX` matters. With Ollama's default 4096-token context, the
+  system prompt, tool schemas and one email left the model 9 tokens to
+  answer, and it returned an empty reply.
+- It is looser with Gmail search syntax than Gemini (it once used
+  `is:inbox`), so the search tool's description lists the operators.
+  Concrete instructions work best. Given a vague one, it asks for
+  clarification instead of searching.
+- Its prose is terser than Gemini's. For client-facing drafts, Gemini is
+  the better choice.
+
+## Known limitations
+
+- **No API authentication.** It's loopback-only by default, and must sit
+  behind an authenticating proxy if exposed.
+- **One process, in-memory state.** Pending approvals, conversation
+  history, the audit trail, metrics and the idempotency guard live in
+  memory: they vanish on restart, and aren't shared across workers. Run a
+  single worker. Each would need a persistent store (the interfaces allow
+  it) for anything more.
+- **The retrieval store is never populated by the app** (see
+  [Retrieval](#retrieval-rag)), and `draft_grounded_reply` isn't in the
+  evaluation suite, since it needs a vector store and an embedding model.
+- **Not a real MCP server.** The tools are internal; other MCP clients
+  can't use them.
+- **After an approval,** the model gets one closing turn. Further tool
+  calls it proposes are reported, not executed, and the next instruction
+  continues the work.
+- **Limits are per instruction**, not per conversation. Each `/run` gets
+  a fresh budget. This is deliberate: a runaway *instruction* is what
+  needs bounding.
+- **Single-user OAuth.** The Desktop-app flow suits local use. A hosted,
+  multi-user deployment needs a web OAuth flow and per-user tokens.
+- **Prompt-injection resistance at the prompt level is best effort.** The
+  guarantees are the structural ones in [Safety](#safety). The fact check
+  on drafts only recognizes dates and amounts.
+- **Efficiency left on the table.** Tool calls within one model turn run
+  one after another. A thread read by two tools in one run is fetched
+  twice. Services are built on the first agent request, not at startup,
+  so `/health` works without credentials but the first request pays the
+  setup cost. FastAPI also builds them for a request it then rejects as
+  invalid.
+- **Verification gaps.** The approve-and-send path has run end to end
+  against the in-memory mailbox (scripted and live), not against real
+  Gmail. The Docker image has never been built.

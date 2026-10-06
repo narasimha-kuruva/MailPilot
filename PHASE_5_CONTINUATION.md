@@ -538,23 +538,19 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     container: create `secrets/token.json` on the host first. Ollama from
     a container: `OLLAMA_BASE_URL=http://host.docker.internal:11434`.
 
-18. **Phase 5.12 Full README rewrite.** Do this LAST, after everything above
-    is implemented and verified, so it documents what's actually true. Must
-    cover: complete architecture (update the layer diagram — RAG is no
-    longer "interface only"), agent execution flow (the ReAct-loop-not-
-    plan-and-execute decision and why), LangChain vs LangGraph responsibility
-    split, MCP tool architecture (11 tools now, still an internal `MCPTool`
-    ABC + LangChain adapter, not a real MCP server — note as a limitation),
-    Gmail integration (OAuth scope, retry behavior), RAG architecture
-    (chunking/embedding/Chroma/metadata/filtering), human-in-the-loop flow
-    (including the blind-approval fix, TTL/expiry, idempotency guard),
-    safety architecture (guardrails, prompt injection defenses — structural
-    AND prompt-level, be honest about what's a guarantee vs best-effort),
-    audit logging, observability/metrics, evaluation strategy, testing
-    strategy (unit vs integration split), environment configuration (all
-    `.env.example` vars), Docker usage, and an explicit "Known limitations"
-    section. An ASCII architecture diagram is fine (matches the existing
-    README style) — don't reach for an image.
+18. ✅ **DONE (2026-10-06)** -- Phase 5.12 README rewritten end to end:
+    quick start (incl. a one-line OAuth authorize command), "Talking to
+    the agent" (endpoints, example session, status codes, X-Request-ID,
+    the no-auth warning), architecture + request flow, ReAct-vs-plan,
+    LangChain/LangGraph/own-code split, interrupt_before rationale, tool
+    table (11, not a real MCP server), Gmail, RAG (incl. "nothing in the
+    app ingests into the store"), human approval, safety table
+    (guarantee vs best effort), reliability, audit, observability,
+    evaluation (live gemma4:e2b 14/14 single run; an earlier run 13/14),
+    testing, full config table, Docker (image NOT built), provider choice,
+    known limitations. Also found and fixed while writing it (separate
+    commits): RAG_TOP_K was never read; .env.example inline comments
+    would break `docker run --env-file`.
 
 ### E. Final steps (after all of the above)
 
