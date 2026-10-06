@@ -20,7 +20,7 @@ from collections import defaultdict
 from mailpilot.audit.service import AuditService
 from mailpilot.logging_config import get_logger
 from mailpilot.observability.metrics import MetricsRegistry
-from mailpilot.redaction import redact_value
+from mailpilot.redaction import redact_text, redact_value
 from mailpilot.schemas.audit import AuditRecord
 
 logger = get_logger(__name__)
@@ -32,7 +32,15 @@ class InMemoryAuditService(AuditService):
         self._metrics = metrics
 
     async def record(self, record: AuditRecord) -> None:
-        record = AuditRecord.model_validate(redact_value(record.model_dump()))
+        # Only the content fields: the ids are what records are looked up by,
+        # and redacting one ("ticket-api_key:7781") would hide the record.
+        record = record.model_copy(
+            update={
+                "agent_request": redact_text(record.agent_request),
+                "tool_args": redact_value(record.tool_args),
+                "result_summary": None if record.result_summary is None else redact_text(record.result_summary),
+            }
+        )
         self._records[record.conversation_id].append(record)
         logger.info("agent_tool_call", extra={"extra_fields": record.model_dump(mode="json")})
         if self._metrics is not None:

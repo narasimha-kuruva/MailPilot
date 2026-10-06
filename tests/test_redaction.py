@@ -50,10 +50,26 @@ def test_bearer_header_is_redacted() -> None:
         ('{\\"api_key\\": \\"opaque-value-4\\"}', f'{{\\"api_key\\": \\"{REDACTED}\\"}}'),
         ("password: hunter2", f"password: {REDACTED}"),
         ("GOOGLE_API_KEY=opaque-value-5", f"GOOGLE_API_KEY={REDACTED}"),
+        # The label can end a longer name.
+        ("GMAIL_REFRESH_TOKEN=opaque-value-6", f"GMAIL_REFRESH_TOKEN={REDACTED}"),
+        ("oauth_access_token: opaque-value-7", f"oauth_access_token: {REDACTED}"),
+        ("MAILPILOT_API_KEY=opaque-value-8", f"MAILPILOT_API_KEY={REDACTED}"),
+        # A quoted value is redacted whole, spaces, commas and escaped quotes included.
+        ('{"password": "correct horse, battery"}', f'{{"password": "{REDACTED}"}}'),
+        ('{"password": "say \\"hi\\" twice", "user": "bo"}', f'{{"password": "{REDACTED}", "user": "bo"}}'),
+        ("{'password': 'two words'}", f"{{'password': '{REDACTED}'}}"),
+        ('{\\"password\\": \\"two words\\"}', f'{{\\"password\\": \\"{REDACTED}\\"}}'),
+        # An unquoted value keeps its commas.
+        ("login?password=ab,cd&next=/", f"login?password={REDACTED}&next=/"),
     ],
 )
 def test_values_labelled_as_secrets_are_redacted(text: str, expected: str) -> None:
     assert redact_text(text) == expected
+
+
+@pytest.mark.parametrize("text", ["api_keys_count=3", "password_hint: blue", "the passwords: rotated"])
+def test_names_that_merely_contain_a_secret_label_are_left_alone(text: str) -> None:
+    assert redact_text(text) == text
 
 
 def test_a_shaped_secret_under_a_secret_label_is_redacted_once() -> None:
@@ -160,3 +176,21 @@ async def test_audit_records_are_stored_redacted() -> None:
     assert stored.tool_args == {"to": ["bob@example.com"], "body_text": f"here it is: {REDACTED}"}
     assert "hunter2" not in (stored.result_summary or "")
     assert stored.status is ToolCallStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_audit_ids_are_kept_so_records_can_still_be_found() -> None:
+    audit = InMemoryAuditService()
+
+    await audit.record(
+        AuditRecord(
+            conversation_id="ticket-api_key:7781",
+            step_id="call-password=1",
+            agent_request="check the ticket",
+            tool_name="search_emails",
+            status=ToolCallStatus.SUCCESS,
+        )
+    )
+
+    [stored] = await audit.get_history("ticket-api_key:7781")
+    assert stored.step_id == "call-password=1"

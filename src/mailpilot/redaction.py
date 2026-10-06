@@ -74,12 +74,49 @@ _ASSIGNMENT_KEYS = (
     "apikey",
     "password",
 )
+# The label may end a longer name (GMAIL_REFRESH_TOKEN, oauth_access_token):
+# only a letter or digit right before it rules it out. What follows the
+# separator is the value's opening quote, if it has one -- `"`, `'`, or `\"`
+# for JSON quoted inside a string.
 _ASSIGNMENT = re.compile(
-    r"(?i)\b(" + "|".join(_ASSIGNMENT_KEYS) + r")"
-    r"(\\?[\"']?\s*[:=]\s*\\?[\"']?)"
-    r"(?!" + re.escape(REDACTED) + r")"
-    r"([^\s\"'\\&,;}\]]+)"
+    r"(?i)(?<![A-Za-z0-9])(?:" + "|".join(_ASSIGNMENT_KEYS) + r")"
+    r"\\?[\"']?\s*[:=]\s*"
+    r"(?P<quote>\\\"|\"|')?"
 )
+# An unquoted value runs to whitespace or a structural character. A comma is
+# not one: it can be part of a password.
+_UNQUOTED_VALUE_END = re.compile(r"[\s\"'\\&;}\]]")
+
+
+def _value_end(text: str, start: int, quote: str | None) -> int:
+    """Where the value starting at `start` ends: its closing quote, or the end of an unquoted token."""
+    if not quote:
+        stop = _UNQUOTED_VALUE_END.search(text, start)
+        return stop.start() if stop else len(text)
+    position = start
+    while True:
+        position = text.find(quote, position)
+        if position == -1:
+            return len(text)
+        if quote == '"' and text[position - 1] == "\\":  # an escaped quote inside the value
+            position += 1
+            continue
+        return position
+
+
+def _redact_assignments(text: str) -> str:
+    parts: list[str] = []
+    copied_up_to = 0
+    for match in _ASSIGNMENT.finditer(text):
+        start = match.end()
+        if start < copied_up_to or text.startswith(REDACTED, start):
+            continue  # inside a value already replaced, or already redacted by shape
+        end = _value_end(text, start, match.group("quote"))
+        if end > start:
+            parts += [text[copied_up_to:start], REDACTED]
+            copied_up_to = end
+    parts.append(text[copied_up_to:])
+    return "".join(parts)
 
 
 def redact_text(text: str) -> str:
@@ -87,7 +124,7 @@ def redact_text(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
     text = _BEARER.sub(rf"\g<1>{REDACTED}", text)
-    return _ASSIGNMENT.sub(rf"\g<1>\g<2>{REDACTED}", text)
+    return _redact_assignments(text)
 
 
 def is_sensitive_key(key: Any) -> bool:
