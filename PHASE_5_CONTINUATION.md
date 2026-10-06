@@ -500,20 +500,26 @@ Found live: a single transient 503 from Gemini killed the whole run with a 500.
     1 skipped (`embeddinggemma` not pulled -> RAG tools can't run live on
     Ollama until `ollama pull embeddinggemma`).
 
-16. **Phase 5.10 API hardening.** In `main.py`, add a global exception
-    handler (`@app.exception_handler(Exception)`) that catches anything
-    unhandled, logs it server-side with full detail, and returns a
-    sanitized JSON response (generic message + a request id, no stack
-    trace, no secrets) — currently an unhandled exception would leak a
-    default FastAPI/Starlette traceback in debug scenarios. Add a small
-    request-ID middleware (generate a UUID per request, stash in
-    `request.state`, include as `X-Request-ID` response header and in log
-    records via the existing `extra_fields` mechanism in
-    `logging_config.py`). Double check all `HTTPException` usages return
-    sensible status codes (already mostly done: 503 missing API key, 404
-    missing pending approval, 410 expired approval — add 400 for
-    `GuardrailViolation` if/when it can bubble up to a route, 422 comes
-    automatically from Pydantic validation).
+16. ✅ **DONE (2026-10-06)** -- Phase 5.10 API hardening.
+    `api/middleware.py` `request_context` (registered in `create_app`):
+    request id = caller's `X-Request-ID` if it matches
+    `[A-Za-z0-9._-]{1,64}`, else a fresh uuid4 hex; returned as a response
+    header; set in `logging_config.request_id_var` (ContextVar) so EVERY log
+    line during the request carries `request_id` (audit lines included).
+    Anything unhandled -> logged in full (redacted) + generic 500
+    `{"detail": ..., "request_id": ...}`; no traceback/exception text in the
+    body. Done as middleware rather than `@app.exception_handler(Exception)`
+    because Starlette re-raises after that handler (uvicorn would then log
+    the raw traceback outside our redacting formatter). One `http_request`
+    log line per request (method, path, status, duration_ms).
+    `configure_logging` routes uvicorn's loggers through the JSON/redacting
+    formatter and silences uvicorn's access log (replaced by ours).
+    `AgentRequest.instruction` 1..10000 chars, `conversation_id` 1..200 ->
+    422 otherwise. `API_HOST` default 0.0.0.0 -> 127.0.0.1 (the API has NO
+    auth; Docker CMD still binds 0.0.0.0 inside the container). Existing
+    404/410/503 kept. No GuardrailViolation->400 handler: it can't reach a
+    route (tools_node catches it). Tests: `tests/test_api_hardening.py` (9).
+    Note: the user's own (gitignored) `.env` still says API_HOST=0.0.0.0.
 
 17. **Phase 5.11 Docker.** Add `Dockerfile` (multi-stage: builder installs
     deps with `pip install .`, final stage copies venv/site-packages, runs

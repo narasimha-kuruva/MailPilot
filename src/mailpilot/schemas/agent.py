@@ -25,8 +25,8 @@ class ApprovalStatus(StrEnum):
 class AgentRequest(BaseModel):
     """A natural-language instruction submitted by the user."""
 
-    instruction: str
-    conversation_id: str | None = None
+    instruction: str = Field(..., min_length=1, max_length=10_000)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class PlannedStep(BaseModel):

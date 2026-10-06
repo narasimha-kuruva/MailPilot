@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     # --- Application ---
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
-    api_host: str = "0.0.0.0"
+    # Loopback by default: the API has no authentication of its own, and
+    # anyone who can reach it can read the mailbox and approve sends.
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
 
     # --- LLM provider selection (Phase 5) ---

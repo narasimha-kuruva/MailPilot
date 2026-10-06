@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from mailpilot.api.middleware import request_context
 from mailpilot.api.routes.agent import router as agent_router
 from mailpilot.api.routes.health import router as health_router
 from mailpilot.api.routes.metrics import router as metrics_router
@@ -38,6 +39,10 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Request ids, one log line per request, and a sanitized 500 for anything
+    # unhandled -- see mailpilot.api.middleware.
+    app.middleware("http")(request_context)
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(agent_router, prefix="/api/v1")
