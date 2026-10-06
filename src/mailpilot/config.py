@@ -32,10 +32,13 @@ class Settings(BaseSettings):
     # --- Application ---
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
-    # Loopback by default: the API has no authentication of its own, and
-    # anyone who can reach it can read the mailbox and approve sends.
+    # Loopback by default: anyone who can reach the API can read the mailbox
+    # and approve sends, unless MAILPILOT_API_KEY is set (see api/security.py).
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # Required on every agent/context/metrics request when set. Unset: only
+    # requests from this machine are accepted.
+    mailpilot_api_key: str | None = Field(default=None, repr=False)
 
     # --- LLM provider selection (Phase 5) ---
     # "ollama" (default): local model via Ollama, no API quota; models must be
@@ -116,6 +119,18 @@ class Settings(BaseSettings):
                 "without human approval is not a supported configuration."
             )
         return value
+
+    @field_validator("mailpilot_api_key")
+    @classmethod
+    def _api_key_must_be_strong_enough(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None  # an empty MAILPILOT_API_KEY= line means "no key"
+        if len(value.strip()) < 16:
+            raise ValueError(
+                "MAILPILOT_API_KEY must be at least 16 characters; generate one with "
+                "`python -c \"import secrets; print(secrets.token_urlsafe(32))\"`."
+            )
+        return value.strip()
 
     @model_validator(mode="after")
     def _rag_overlap_must_be_smaller_than_chunk_size(self) -> "Settings":

@@ -16,6 +16,7 @@ from mailpilot.mcp.tools.registry import build_tools
 from mailpilot.rag.chroma_service import ChromaRAGService
 from mailpilot.rag.indexing import index_threads, thread_ids_for_query
 from mailpilot.schemas.email import EmailAddress, EmailMessage, EmailThread
+from tests.conftest import local_client
 from tests.fakes import FakeEmbeddingFunction
 
 
@@ -122,7 +123,7 @@ def api(tmp_path: Path) -> TestClient:
     app.dependency_overrides[get_gmail_client] = _mailbox
     store = _store(tmp_path)
     app.dependency_overrides[get_rag_service] = lambda: store
-    return TestClient(app)
+    return local_client(app)
 
 
 def test_index_threads_by_id_and_by_search(api: TestClient) -> None:

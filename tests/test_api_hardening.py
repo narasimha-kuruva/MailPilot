@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from mailpilot.api.deps import get_agent
 from mailpilot.logging_config import StructuredFormatter
 from mailpilot.main import create_app
+from tests.conftest import local_client
 
 FAKE_API_KEY = "AIza" + "Sy" + "q" * 33
 
@@ -40,7 +41,7 @@ def failing_client() -> TestClient:
     async def boom() -> None:
         raise RuntimeError(f"Gemini rejected key {FAKE_API_KEY} for alice@example.com's thread")
 
-    return TestClient(app)
+    return local_client(app)
 
 
 def test_every_response_carries_a_generated_request_id(client: TestClient) -> None:
@@ -105,7 +106,7 @@ def test_invalid_agent_requests_are_rejected_with_422(body: dict) -> None:
     app = create_app()
     # A stand-in: FastAPI resolves dependencies even for a request it then rejects.
     app.dependency_overrides[get_agent] = object
-    client = TestClient(app)
+    client = local_client(app)
 
     response = client.post("/api/v1/agent/run", json=body)
 

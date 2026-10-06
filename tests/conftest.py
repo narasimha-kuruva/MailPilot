@@ -3,16 +3,32 @@ from __future__ import annotations
 import os
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mailpilot.config import Settings, get_settings
 from mailpilot.main import create_app
 
 RUN_INTEGRATION_TESTS = os.environ.get("MAILPILOT_RUN_INTEGRATION_TESTS") == "1"
 
+LOOPBACK = ("127.0.0.1", 50000)
+
+
+def local_client(app: FastAPI, *, api_key: str | None = None, client: tuple[str, int] = LOOPBACK) -> TestClient:
+    """A test client calling `app` from this machine.
+
+    The app's settings are pinned (no `.env`, `MAILPILOT_API_KEY` = `api_key`),
+    so whether a request is let in never depends on the developer's own
+    configuration.
+    """
+    pinned = Settings(_env_file=None, mailpilot_api_key=api_key)
+    app.dependency_overrides[get_settings] = lambda: pinned
+    return TestClient(app, client=client)
+
 
 @pytest.fixture
 def client() -> TestClient:
-    return TestClient(create_app())
+    return local_client(create_app())
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

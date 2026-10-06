@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from mailpilot.api.middleware import request_context
 from mailpilot.api.routes.agent import router as agent_router
 from mailpilot.api.routes.context import router as context_router
 from mailpilot.api.routes.health import router as health_router
 from mailpilot.api.routes.metrics import router as metrics_router
+from mailpilot.api.security import require_api_access
 from mailpilot.config import get_settings
 from mailpilot.logging_config import configure_logging, get_logger
 
@@ -45,10 +46,13 @@ def create_app() -> FastAPI:
     # unhandled -- see mailpilot.api.middleware.
     app.middleware("http")(request_context)
 
+    # Everything except /health needs the API key, or a loopback client when
+    # no key is configured -- see mailpilot.api.security.
     app.include_router(health_router, prefix="/api/v1")
-    app.include_router(agent_router, prefix="/api/v1")
-    app.include_router(metrics_router, prefix="/api/v1")
-    app.include_router(context_router, prefix="/api/v1")
+    protected = [Depends(require_api_access)]
+    app.include_router(agent_router, prefix="/api/v1", dependencies=protected)
+    app.include_router(metrics_router, prefix="/api/v1", dependencies=protected)
+    app.include_router(context_router, prefix="/api/v1", dependencies=protected)
 
     return app
 

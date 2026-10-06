@@ -123,6 +123,8 @@ curl -s http://127.0.0.1:8000/api/v1/agent/5b0c…/audit
 
 | Status | When |
 |---|---|
+| `401` | A key is configured and the request didn't send it, or sent a wrong one (see [Access](#access)) |
+| `403` | No key is configured and the request didn't come from this machine |
 | `404` | `/decision` for a conversation with nothing pending |
 | `410` | `/decision` after the approval expired (`APPROVAL_TTL_SECONDS`, default 30 minutes); nothing was sent |
 | `422` | Invalid input, e.g. an empty instruction or one over 10,000 characters |
@@ -133,9 +135,23 @@ Every response carries an `X-Request-ID` header. Send your own (letters,
 digits, `.`, `_` and `-`, up to 64 characters) to correlate with your
 logs.
 
-> **The API has no authentication.** Anyone who can reach it can read the
-> mailbox and approve sends. It listens on `127.0.0.1` by default; don't
-> expose it beyond that without an authenticating proxy in front.
+### Access
+
+Anyone who can call the API can read the mailbox and approve sends, so
+access is closed by default:
+
+- **No `MAILPILOT_API_KEY` set:** only requests from this machine
+  (loopback) are accepted. Others get `403`. This holds even if the server
+  is bound to `0.0.0.0`.
+- **`MAILPILOT_API_KEY` set** (at least 16 characters): every request must
+  send it, as `X-API-Key: <key>` or `Authorization: Bearer <key>`. Others
+  get `401`. Generate a key with
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+- **Always open:** `/api/v1/health` and the docs. On `/docs`, use
+  **Authorize** to enter the key.
+
+A reverse proxy on the same machine reaches MailPilot from loopback, so
+without a key, the proxy itself must authenticate its users.
 
 ## Architecture
 
@@ -466,7 +482,7 @@ sample, not a constant.
 ## Testing
 
 ```bash
-pytest                                                       # 290 unit tests, no network
+pytest                                                       # 305 unit tests, no network
 MAILPILOT_RUN_INTEGRATION_TESTS=1 pytest -m integration      # real Gmail + real model
 ```
 
@@ -494,6 +510,7 @@ All settings come from environment variables or `.env` (see
 | `APP_ENV` | `development` | Reported by `/health`; changes no behavior |
 | `LOG_LEVEL` | `INFO` | Root log level |
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Used by `python -m mailpilot.main` |
+| `MAILPILOT_API_KEY` | — | Required on every request when set (16+ characters). Unset: this machine only. See [Access](#access) |
 | `LLM_PROVIDER` | `ollama` | `ollama` or `gemini`; never falls back from one to the other |
 | `GOOGLE_API_KEY` | — | Gemini only |
 | `GEMINI_MODEL` | `gemini-3.7-flash` | Gemini only |
@@ -549,8 +566,11 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
   Desktop on macOS and Windows maps ownership for you.
 - **Ollama on the host** is `host.docker.internal` from inside the
   container. On Linux, add `--add-host=host.docker.internal:host-gateway`.
-- The server listens on `0.0.0.0` *inside* the container. Publish the port
-  to `127.0.0.1` as shown, since the API has no authentication.
+- **Set `MAILPILOT_API_KEY`.** From inside the container, your requests
+  arrive through Docker's network, not from loopback, so without a key
+  every agent request is refused with `403`. The server listens on
+  `0.0.0.0` inside the container. Publishing the port to `127.0.0.1`, as
+  shown, keeps it off the network as well.
 - `--env-file` keeps an inline `# comment` as part of the value. Keep
   comments on their own lines, as `.env.example` does.
 - The container runs as an unprivileged user (uid 10001) and has a health
@@ -594,8 +614,9 @@ evaluation:
 
 ## Known limitations
 
-- **No API authentication.** It's loopback-only by default, and must sit
-  behind an authenticating proxy if exposed.
+- **One shared API key, no user accounts.** Anyone with the key has full
+  access. There are no per-user permissions and no key rotation beyond
+  changing the setting and restarting.
 - **One process, in-memory state.** Pending approvals, conversation
   history, the audit trail, metrics and the idempotency guard live in
   memory: they vanish on restart, and aren't shared across workers. Run a
